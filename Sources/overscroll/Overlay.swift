@@ -80,6 +80,11 @@ final class OverlayView: NSView {
     var scrollAvailable: Bool = false { didSet { needsDisplay = true } }
     var rowCount: Int = 0 { didSet { needsDisplay = true } }
 
+    /// Unobserved spans sitting before / after what is currently on screen. Drives the arrows that
+    /// point the user back toward content the capture missed.
+    var gapsAbove: Int = 0 { didSet { syncAnimation() } }
+    var gapsBelow: Int = 0 { didSet { syncAnimation() } }
+
     /// Edges that captured content extends past, with the animation running while any exist.
     private(set) var capturedEdges: Set<CaptureEdge> = []
     private var lastEdgeAdded: (edge: CaptureEdge, at: Date)?
@@ -93,16 +98,28 @@ final class OverlayView: NSView {
     /// Record that a scroll in this direction actually brought in new content.
     func noteCapturedEdge(_ edge: CaptureEdge) {
         lastEdgeAdded = (edge, Date())
-        let isNew = capturedEdges.insert(edge).inserted
-        if isNew || animationTimer == nil { startAnimating() }
-        needsDisplay = true
+        capturedEdges.insert(edge)
+        syncAnimation()
     }
 
     func clearCapturedEdges() {
         capturedEdges.removeAll()
+        gapsAbove = 0
+        gapsBelow = 0
         lastEdgeAdded = nil
         animationTimer?.invalidate()
         animationTimer = nil
+        needsDisplay = true
+    }
+
+    /// Run the animation only while something on screen is actually animating.
+    private func syncAnimation() {
+        if capturedEdges.isEmpty && gapsAbove == 0 && gapsBelow == 0 {
+            animationTimer?.invalidate()
+            animationTimer = nil
+        } else {
+            startAnimating()
+        }
         needsDisplay = true
     }
 
@@ -143,6 +160,7 @@ final class OverlayView: NSView {
                 border.setLineDash([6, 4], count: 2, phase: 0)
             }
             border.stroke()
+            drawGapArrows(in: highlight)
             drawDimensions(for: highlight)
         } else {
             bounds.fill()
@@ -198,6 +216,96 @@ final class OverlayView: NSView {
         }
     }
 
+    /// Arrows pointing toward content the capture skipped.
+    ///
+    /// Distinct from the edge glow on purpose. The glow is accent-coloured and means "content was
+    /// captured from beyond here" — a success. These are amber, chevron-shaped, and drift *outward*
+    /// in the direction the user must scroll to recover what was missed. Same surface, opposite
+    /// meanings, so they must not be mistakable for one another.
+    private func drawGapArrows(in rect: NSRect) {
+        if gapsAbove > 0 { drawChevronStack(in: rect, pointingUp: true, count: gapsAbove) }
+        if gapsBelow > 0 { drawChevronStack(in: rect, pointingUp: false, count: gapsBelow) }
+    }
+
+    private func drawChevronStack(in rect: NSRect, pointingUp: Bool, count: Int) {
+        let amber = NSColor.systemOrange
+        let chevronWidth: CGFloat = 22
+        let chevronHeight: CGFloat = 9
+        let spacing: CGFloat = 13
+        let centerX = rect.midX
+        let stackDepth = spacing * 3 + 30
+
+        // A selection can sit hard against a screen edge, leaving no room outside it. Rather than
+        // drawing the arrows off-screen where they would be invisible exactly when needed, fold
+        // them inside the selection and keep pointing the same way.
+        let roomOutside = pointingUp ? bounds.maxY - rect.maxY : rect.minY - bounds.minY
+        let inside = roomOutside < stackDepth
+        // Anchor just outside the edge normally, just inside it when folded.
+        let baseAnchor = pointingUp
+            ? (inside ? rect.maxY - 10 : rect.maxY + 10)
+            : (inside ? rect.minY + 10 : rect.minY - 10)
+        // Folding reverses which way the stack marches away from the anchor.
+        let march: CGFloat = inside ? -1 : 1
+
+        // The HUD is pinned to the bottom centre, exactly where the downward stack wants to live.
+        // Push the stack clear of it rather than letting the count badge disappear behind it —
+        // which is precisely when the user most needs to read it.
+        var anchor = baseAnchor
+        if !pointingUp {
+            let hud = hudLayout().box
+            if hud.intersects(NSRect(x: centerX - chevronWidth, y: bounds.minY,
+                                     width: chevronWidth * 2, height: hud.maxY)) {
+                // Lowest point the stack and its label will reach, before any correction.
+                let reach = inside ? anchor : anchor - (spacing * 3 + 6) - 15
+                let required = hud.maxY + 12
+                if reach < required { anchor += required - reach }
+            }
+        }
+        let anchorY = anchor
+
+        // Continuous drift, so the motion reads as "keep going this way" rather than a blink.
+        let travel = (animationPhase * 6).truncatingRemainder(dividingBy: spacing)
+
+        for index in 0..<3 {
+            let progress = CGFloat(index) * spacing + travel
+            // Fade in as a chevron emerges and out as it reaches the end of its run.
+            let span = spacing * 3
+            let fade = 1 - abs((progress / span) * 2 - 1)
+            let alpha = max(0, min(1, fade)) * 0.85
+            guard alpha > 0.01 else { continue }
+
+            let travelled = progress * march
+            let baseY = pointingUp ? anchorY + travelled : anchorY - travelled
+            // The tip always points the way the user must scroll, regardless of folding.
+            let tipY = pointingUp ? baseY + chevronHeight : baseY - chevronHeight
+
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: centerX - chevronWidth / 2, y: baseY))
+            path.line(to: NSPoint(x: centerX, y: tipY))
+            path.line(to: NSPoint(x: centerX + chevronWidth / 2, y: baseY))
+            path.lineWidth = 3
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            amber.withAlphaComponent(alpha).setStroke()
+            path.stroke()
+        }
+
+        let label = count == 1 ? "1 gap" : "\(count) gaps"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = label.size(withAttributes: attrs)
+        let labelTravel = (spacing * 3 + 6) * march
+        let labelY = pointingUp
+            ? anchorY + labelTravel
+            : anchorY - labelTravel - size.height
+        let box = NSRect(x: centerX - size.width / 2 - 6, y: labelY - 2, width: size.width + 12, height: size.height + 4)
+        amber.withAlphaComponent(0.9).setFill()
+        NSBezierPath(roundedRect: box, xRadius: 4, yRadius: 4).fill()
+        label.draw(at: NSPoint(x: centerX - size.width / 2, y: labelY), withAttributes: attrs)
+    }
+
     private func drawDimensions(for rect: NSRect) {
         let label = "\(Int(rect.width)) × \(Int(rect.height))"
         let attrs: [NSAttributedString.Key: Any] = [
@@ -210,6 +318,44 @@ final class OverlayView: NSView {
         NSColor.black.withAlphaComponent(0.75).setFill()
         NSBezierPath(roundedRect: background, xRadius: 4, yRadius: 4).fill()
         label.draw(at: origin, withAttributes: attrs)
+    }
+
+    /// The HUD's frame and its rendered text, so other elements can avoid overlapping it.
+    private func hudLayout() -> (box: NSRect, text: String, attrs: [NSAttributedString.Key: Any]) {
+        var parts: [String] = []
+        switch mode {
+        case .selecting:
+            parts.append("Drag to select")
+            if scrollAvailable { parts.append("WASD/arrows scroll") }
+            parts.append("Space: pick window")
+        case .pickingWindow:
+            parts.append("Click a window")
+            parts.append("Space: back to drag")
+        case .locked:
+            if scrollAvailable { parts.append("WASD/arrows or trackpad to scroll") }
+            parts.append("I: image \(keepImage ? "ON" : "off")")
+            if rowCount > 0 { parts.append("Return: copy \(rowCount) rows") }
+        }
+        parts.append("Esc: cancel")
+
+        let hint = parts.joined(separator: "  ·  ")
+        let text = statusText.isEmpty ? hint : "\(hint)\n\(statusText)"
+
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: style,
+        ]
+        let size = text.size(withAttributes: attrs)
+        let box = NSRect(
+            x: bounds.midX - size.width / 2 - 16,
+            y: bounds.minY + 48,
+            width: size.width + 32,
+            height: size.height + 20
+        )
+        return (box, text, attrs)
     }
 
     private func drawHUD() {

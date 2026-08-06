@@ -441,7 +441,23 @@ final class CaptureController: NSObject, OverlayDelegate {
         }
         pendingEdge = nil
         view?.rowCount = transcript.rows.count
+        updateGapIndicators()
         updateStatus(outcome: outcome)
+    }
+
+    /// Point the arrows at where the missed content actually is, relative to what is on screen now.
+    ///
+    /// Gaps are spans in document space, so their position relative to the current viewport is a
+    /// live quantity: scroll toward one and the arrow flips sides, then disappears once the ground
+    /// has been re-observed. That is more useful than a static count, which tells the user
+    /// something went wrong but not what to do about it.
+    private func updateGapIndicators() {
+        guard let view, regionCG.height > 0 else { return }
+        let counts = transcript.gapsRelativeToViewport(
+            screenRange: regionCG.minY...regionCG.maxY
+        )
+        view.gapsAbove = counts.above
+        view.gapsBelow = counts.below
     }
 
     private func updateStatus(outcome: ScrollTranscript.Outcome) {

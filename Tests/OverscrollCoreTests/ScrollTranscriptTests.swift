@@ -190,3 +190,64 @@ struct ScrollTranscriptTests {
         #expect(transcript.rows[indices[0]].text == "b")
     }
 }
+
+@Suite("ScrollTranscript gap navigation")
+struct ScrollTranscriptGapNavigationTests {
+
+    /// Builds a transcript with one gap sitting above the current viewport.
+    private func transcriptWithGapAbove() -> ScrollTranscript {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30)]))
+        // No shared row: displacement assumed, so a gap is recorded between 30 and 400.
+        transcript.ingest(snap([("y", 400), ("z", 430)]), commandedDisplacement: 0)
+        return transcript
+    }
+
+    @Test("a gap earlier in the document reports as above the viewport")
+    func gapAbove() {
+        let transcript = transcriptWithGapAbove()
+        // Viewport sits entirely past the gap span (30...400) — touching it would count as within.
+        let counts = transcript.gapsRelativeToViewport(screenRange: 410...460)
+        #expect(counts.above == 1)
+        #expect(counts.below == 0)
+    }
+
+    @Test("a gap later in the document reports as below the viewport")
+    func gapBelow() {
+        let transcript = transcriptWithGapAbove()
+        // Viewport back at the start, entirely before the gap span (30...400).
+        let counts = transcript.gapsRelativeToViewport(screenRange: 0...20)
+        #expect(counts.above == 0)
+        #expect(counts.below == 1)
+    }
+
+    // Neither arrow should point anywhere while the gap is on screen.
+    @Test("a gap overlapping the viewport reports in neither direction")
+    func gapWithinViewport() {
+        let transcript = transcriptWithGapAbove()
+        let counts = transcript.gapsRelativeToViewport(screenRange: 0...440)
+        #expect(counts.above == 0)
+        #expect(counts.below == 0)
+    }
+
+    // A marker that never clears trains the user to ignore it.
+    @Test("scrolling back over a gap closes it")
+    func observingClosesGap() {
+        var transcript = transcriptWithGapAbove()
+        #expect(transcript.gapCount == 1)
+        // Re-observe the skipped ground, anchored to content we already have.
+        transcript.ingest(snap([("b", 30), ("mid1", 150), ("mid2", 300), ("y", 400)]))
+        #expect(transcript.gapCount == 0)
+    }
+
+    @Test("partially covering a gap leaves the uncovered remainder")
+    func partialCoverageLeavesRemainder() {
+        var transcript = transcriptWithGapAbove()
+        // Only the lower half of the 30...400 span is observed.
+        transcript.ingest(snap([("b", 30), ("mid", 200)]))
+        #expect(transcript.gapCount == 1)
+        let span = transcript.gapSpans[0]
+        #expect(span.lowerBound == 200)
+        #expect(span.upperBound == 400)
+    }
+}

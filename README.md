@@ -71,6 +71,22 @@ resolves, `Return` until there is something to copy. When scrolling pulls conten
 came from glows**, with a brief flash on the edge that just grew — the box never moves while the
 content does, so this is the only signal that a scroll accomplished anything.
 
+**Gaps point the way back.** Because gaps are spans in document space, their position relative to
+what is currently on screen is a live quantity — so instead of a bare count, amber chevrons drift
+toward the edge you must scroll to reach the missing content, labelled with how many spans lie that
+way. Scroll toward one and the arrow flips sides as you pass it, then disappears once the skipped
+ground has been re-observed. Amber and chevron-shaped so they cannot be confused with the blue
+edge glow, which means the opposite thing (content successfully captured). When the selection sits
+hard against a screen edge the arrows fold inside it rather than drawing off-screen, and they step
+clear of the HUD rather than hiding behind it.
+
+You can inspect the overlay without running a capture, which is otherwise awkward since it covers
+the screen:
+
+```bash
+Overscroll --render-preview /tmp/overlay.png --gaps-above 2 --gaps-below 1 --locked [--edge]
+```
+
 Both the markdown and the file path land on the clipboard. Paste the text for a short clip; paste
 the **path** for a long one, so an agent reads it only if it needs it instead of swallowing the
 whole thing as context.

@@ -106,6 +106,9 @@ public struct ScrollTranscript: Sendable {
         // merge therefore cannot have skipped content, no matter how far the offset moved.
         //
         // Which makes the converse the whole definition: no shared row, no proof of continuity.
+        // Scrolling back over a gap is how it gets filled, so newly observed ground closes it.
+        closeGaps(coveredBy: extent(of: incomingPositions))
+
         if !measured {
             if let void = void(between: existingExtent, and: extent(of: incomingPositions)) {
                 gapSpans.append(void)
@@ -201,6 +204,51 @@ public struct ScrollTranscript: Sendable {
             deduped.append(candidate)
         }
         placed = deduped
+    }
+
+    /// Where the unobserved spans sit relative to what is on screen right now.
+    ///
+    /// Gaps live in document space, so once the viewport's own document position is known they can
+    /// be reported as a direction to travel rather than a bare count — which is the difference
+    /// between telling someone "you missed something" and telling them where to go to get it.
+    ///
+    /// `screenRange` is the capture region in screen coordinates (top-left origin, y growing down),
+    /// which this converts using the offset it has been tracking all along.
+    public func gapsRelativeToViewport(screenRange: ClosedRange<Double>) -> (above: Int, below: Int) {
+        let viewport = (screenRange.lowerBound + offset)...(screenRange.upperBound + offset)
+        var above = 0
+        var below = 0
+        for span in gapSpans {
+            if span.upperBound < viewport.lowerBound {
+                above += 1
+            } else if span.lowerBound > viewport.upperBound {
+                below += 1
+            }
+            // A span overlapping the viewport is being looked at right now; neither arrow applies.
+        }
+        return (above, below)
+    }
+
+    /// Remove or shorten gap spans that newly observed content covers.
+    ///
+    /// Pragmatic rather than rigorous: strictly, a span is only closed once an unbroken chain of
+    /// anchored merges crosses it, and this instead trims by whatever was observed. In practice
+    /// scrolling back into a gap is exactly how it gets filled, and a marker that never clears
+    /// would train the user to ignore it.
+    private mutating func closeGaps(coveredBy extent: ClosedRange<Double>?) {
+        guard let extent, !gapSpans.isEmpty else { return }
+        gapSpans = gapSpans.compactMap { span in
+            guard span.overlaps(extent) else { return span }
+            let remainderBelow = extent.upperBound < span.upperBound
+                ? extent.upperBound...span.upperBound : nil
+            let remainderAbove = extent.lowerBound > span.lowerBound
+                ? span.lowerBound...extent.lowerBound : nil
+            // Keep whichever side still has meaningful unobserved distance; a sliver is noise.
+            let candidates = [remainderAbove, remainderBelow]
+                .compactMap { $0 }
+                .filter { $0.upperBound - $0.lowerBound > matchTolerance }
+            return candidates.max { ($0.upperBound - $0.lowerBound) < ($1.upperBound - $1.lowerBound) }
+        }
     }
 
     /// Indices in `rows` after which a gap span falls, for rendering inline markers.

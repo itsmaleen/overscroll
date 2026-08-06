@@ -170,6 +170,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Render the overlay to a PNG without running a capture.
+///
+/// The selection UI is the one part of the app that cannot be unit-tested — it is AppKit drawing —
+/// and driving the real overlay to inspect it means covering the screen and interacting by hand.
+/// This renders a chosen state straight to a file so the visuals can be checked directly.
+///
+///   Overscroll --render-preview /tmp/overlay.png [--gaps-above N] [--gaps-below N] [--locked]
+func renderPreviewIfRequested() -> Bool {
+    let arguments = CommandLine.arguments
+    guard let flagIndex = arguments.firstIndex(of: "--render-preview"),
+          flagIndex + 1 < arguments.count
+    else { return false }
+
+    func intValue(_ flag: String) -> Int {
+        guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return 0 }
+        return Int(arguments[index + 1]) ?? 0
+    }
+
+    let path = arguments[flagIndex + 1]
+    let size = NSSize(width: 900, height: 700)
+    let view = OverlayView(frame: NSRect(origin: .zero, size: size))
+    view.mode = arguments.contains("--locked") ? .locked : .selecting
+    // `--edge` pins the selection against both screen edges, which is the case that forces the gap
+    // arrows to fold inside the selection instead of drawing off-screen.
+    view.selection = arguments.contains("--edge")
+        ? NSRect(x: 180, y: 4, width: 520, height: size.height - 8)
+        : NSRect(x: 180, y: 170, width: 520, height: 360)
+    view.rowCount = 47
+    view.scrollAvailable = true
+    view.gapsAbove = intValue("--gaps-above")
+    view.gapsBelow = intValue("--gaps-below")
+    view.statusText = "47 rows  ·  2 gap(s) — scroll in smaller steps"
+    view.noteCapturedEdge(.top)
+
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return true }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    if let data = rep.representation(using: .png, properties: [:]) {
+        try? data.write(to: URL(fileURLWithPath: path))
+        FileHandle.standardError.write(Data("wrote \(path)\n".utf8))
+    }
+    return true
+}
+
+if renderPreviewIfRequested() {
+    exit(0)
+}
+
 let app = NSApplication.shared
 // Menu-bar only: no Dock icon, no app menu. Also keeps the overlay from stealing focus in a way
 // that would reshuffle the window order we're about to read.
