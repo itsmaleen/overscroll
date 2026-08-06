@@ -29,11 +29,15 @@ tree — one screenful. Chat clients virtualize their message lists, so only the
 as elements, and a long thread falls through both approaches.
 
 Overscroll does scrolling capture in the **text domain**. It scrolls the target, re-reads the
-accessibility tree at each step, and merges the snapshots by **sequence alignment**: the longest
-suffix/prefix run of rows shared between what it has and what just arrived. That is the same
-overlap detection an image stitcher runs on pixels, done on rows instead — exact, cheap, and
-correct even when a chat log is full of repeated `ok` and `👍`, because it matches *runs* rather
-than individual rows.
+accessibility tree at each step, and merges the snapshots by **document geometry**: rows already
+carry a screen position, so any row visible in two consecutive samples reveals exactly how far the
+content moved. Accumulating that displacement gives every row a stable document coordinate, and
+merging becomes insertion into a sorted set.
+
+That has one property worth stating outright: **an anchor is a row present in both viewports, so
+its existence proves they overlap and that nothing passed between them unseen.** A measured merge
+therefore cannot have skipped content, no matter how far the view moved — and the converse is the
+entire definition of a gap. Where an anchor exists, the transcript is provably complete.
 
 The payoff is not only token count. **The accessibility tree carries link targets and exact text
 that the rendered pixels no longer contain.** A link displayed as `docs.google.com/spread…` comes
@@ -134,22 +138,46 @@ Measured against WhatsApp, not assumed. All of these changed the design:
    (`ScrollingContentFilter`), which needs no cooperation from the app's tree.
 4. **Every string is prefixed with U+200E.** Invisible, survives copy-paste, and quietly breaks text
    comparison — including the accumulator's own overlap matching. Stripped at the source.
-5. **Scroll step matters more than expected.** Gaps per 12 merges: 8 at a fixed 60px, **3 with an
-   adaptive step** that halves on a gap and creeps back up on clean merges.
+5. **Scroll step mattered enormously — until it didn't.** Under run alignment, gaps per 12 merges
+   ran 8 at a fixed 60px and 3 with an adaptive step. That whole class of tuning turned out to be
+   compensating for the merge strategy rather than for anything real: switching to geometry took
+   gaps to **zero at every step size tested**, and the step became a throughput knob instead of a
+   correctness one.
 
 ## Design notes
 
-**Gaps are marked, never hidden.** When no shared run can be found, the content between two
-snapshots was never seen. Overscroll records that inline rather than silently joining across it — a
-transcript with an unmarked hole reads as complete, which is worse than one that admits the hole.
+**Gaps are marked, never hidden.** A gap means no row was shared between two samples, so the
+displacement had to be assumed from the commanded scroll rather than measured. Overscroll records
+the span inline rather than silently joining across it — a transcript with an unmarked hole reads
+as complete, which is worse than one that admits the hole.
 
-**A gap never re-appends rows already in the transcript.** Alignment is unknown at that point, and
-blindly appending is what turns a thread with a small exposed window into the same four messages
-repeated five times.
+**Repeated text is disambiguated by position, not by context.** Two `ok` messages sit at different
+document coordinates, so they are trivially distinct. This is the case that most troubles
+text-matching approaches, and geometry sidesteps it entirely.
 
-**Direction decides placement when alignment fails.** Scrolling backwards means unplaceable rows
-belong at the *front*; without that, scrolling back through a thread puts the oldest messages at
-the bottom.
+**The scroll step scales to the region.** Because only one shared row is needed, the limit is
+simply "less than a viewport" — so the step is sized from the region height instead of creeping up
+from a small constant. On WhatsApp a 300px step captured 83 rows to a 150px step's 39, with no gaps
+either way.
+
+### The earlier approach, and why it changed
+
+The first implementation merged by **sequence alignment**: the longest suffix/prefix run of rows
+shared between the transcript and the incoming snapshot — the same overlap detection an image
+stitcher runs on pixels, done on rows. It works, but it needs a run of three rows to be confident,
+and a chat client showing a handful of tall link previews often cannot supply one. Every failure
+was a gap.
+
+Run alignment is still in the tree as `ScrollAccumulator`, and `axprobe` runs both strategies over
+the *identical* snapshot stream so the comparison is not confounded by the target scrolling
+differently between runs. Measured on live WhatsApp:
+
+| scroll step | run alignment | geometry |
+|---|---|---|
+| 40px × 10 | 8 rows, **2 gaps** | 8 rows, **0 gaps** |
+| 80px × 10 | 8 rows, **4 gaps** | 8 rows, **0 gaps** |
+| 150px × 20 | 39 rows, **14 gaps** | 39 rows, **0 gaps** |
+| 300px × 20 | 83 rows, **4 gaps** | 83 rows, **0 gaps** |
 
 **Getting out is guaranteed.** The overlay covers the screen and goes mouse-transparent once locked,
 so a click can pass through and hand focus to another app. There are four independent exits: the
@@ -169,7 +197,8 @@ default.
 ```
 Sources/OverscrollCore/          pure logic, no AppKit — fully unit-tested
   CapturedRow.swift              one harvested row + its normalized identity
-  ScrollAccumulator.swift        sequence-alignment merge across scroll steps
+  ScrollTranscript.swift         geometry merge: document-space placement (primary)
+  ScrollAccumulator.swift        run-alignment merge, retained as comparison baseline
   ScrollingContentFilter.swift   separates scrolling content from static chrome
   ClipDocument.swift             markdown rendering + provenance front matter
 Sources/OverscrollAX/            accessibility + window server, shared by app and probe
@@ -183,7 +212,7 @@ Sources/overscroll/              the app
 Sources/axprobe/                 diagnostic CLI
 ```
 
-`swift test` — 38 tests, all on the pure layer. Requires macOS 14+, Swift 6.
+`swift test` — 52 tests, all on the pure layer. Requires macOS 14+, Swift 6.
 
 ## Status
 
@@ -192,11 +221,11 @@ provenance front matter, gaps marked where content was skipped.
 
 Known rough edges:
 
-- **Gap rate on WhatsApp is ~3 in 12 merges.** Messages are tall and few are exposed at once, so a
-  run of 3 shared rows is hard to guarantee. Gaps are marked, but the transcript is not always
-  complete.
-- Adaptive stepping trades coverage for integrity — it backs off after a gap, so a given number of
-  keypresses covers less ground.
+- **Gaps are now rare but not impossible.** They occur only when no row is shared between two samples; the fix is a smaller step, which the adaptive stepper does automatically.
+
+
+- Adaptive stepping backs off after a gap, so a run of keypresses may cover less ground than the
+  region-sized default would.
 - Only WhatsApp has been tested seriously. Slack, Messages, Mail and browsers are unverified — run
   `axprobe` against them and check the REJECTED roles list first.
 - The OCR fallback has not been exercised against a real canvas-rendered app.

@@ -158,6 +158,9 @@ guard let element = AXHarvester.windowElement(for: target) else {
 
 var contentFilter = ScrollingContentFilter()
 var adaptiveStep = Scroller.AdaptiveScrollStep()
+/// Run both merge strategies over the identical snapshot stream, so the comparison is not
+/// confounded by the target having scrolled differently between two separate runs.
+var transcript = ScrollTranscript()
 let region: CGRect
 if let fractions = options.regionFractions {
     let bounds = target.bounds
@@ -177,7 +180,10 @@ let (rows, diagnostics) = AXHarvester.harvestWithDiagnostics(window: element, re
 print("=== initial harvest ===")
 print("  rows: \(rows.count)")
 printDiagnostics(diagnostics)
-for release in contentFilter.accept(rows) { accumulator.ingest(release) }
+for release in contentFilter.accept(rows) {
+    accumulator.ingest(release)
+    transcript.ingest(release)
+}
 
 if let direction = options.scrollDirection, options.scrollCount > 0 {
     let center = CGPoint(x: region.midX, y: region.midY)
@@ -199,9 +205,14 @@ if let direction = options.scrollDirection, options.scrollCount > 0 {
         RunLoop.current.run(until: Date().addingTimeInterval(0.35))
         let (stepRows, _) = AXHarvester.harvestWithDiagnostics(window: element, region: region)
         let hint: ScrollHint = (direction == .up) ? .towardStart : .towardEnd
+        // Sign matches screen space: scrolling toward the start moves content down (positive).
+        let commanded = Double(effectiveStep) * (direction == .up ? 1 : -1)
         let releases = contentFilter.accept(stepRows)
         var outcomes: [MergeOutcome] = []
-        for release in releases { outcomes.append(accumulator.ingest(release, hint: hint)) }
+        for release in releases {
+            outcomes.append(accumulator.ingest(release, hint: hint))
+            transcript.ingest(release, commandedDisplacement: commanded)
+        }
         for outcome in outcomes {
             switch outcome {
             case .gap: adaptiveStep.registerGap()
@@ -236,6 +247,10 @@ for row in accumulator.rows.prefix(options.maxRows) {
 if !accumulator.gapIndices.isEmpty {
     print("\n⚠️  \(accumulator.gapIndices.count) gap(s) — scroll steps outran the viewport.")
 }
+
+print("\n=== strategy comparison (same snapshot stream) ===")
+print("  run-alignment (ScrollAccumulator): \(accumulator.rows.count) rows, \(accumulator.gapIndices.count) gaps")
+print("  geometry      (ScrollTranscript):  \(transcript.rows.count) rows, \(transcript.gapCount) gaps")
 
 if options.emit {
     // Anything still held by the filter (no scrolling ever observed) belongs in the output too.

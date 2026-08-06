@@ -14,7 +14,11 @@ final class CaptureController: NSObject, OverlayDelegate {
     private var window: OverlayWindow?
     private var view: OverlayView?
 
-    private var accumulator = ScrollAccumulator()
+    /// Geometry-based merge: tracks where content sits in the document rather than matching runs
+    /// of text. Measured against WhatsApp it removed gaps entirely (0 vs 14 on the same snapshot
+    /// stream) because a single shared row is enough to place a snapshot, where run alignment
+    /// needed three consecutive ones and a chat client rarely exposes that many.
+    private var transcript = ScrollTranscript()
     /// Strips the static chrome a dragged region inevitably includes. Without it, sidebar and
     /// toolbar rows interleave with the scrolling content by y-position and reshuffle on every
     /// scroll, which destroys the run alignment the accumulator depends on.
@@ -67,7 +71,7 @@ final class CaptureController: NSObject, OverlayDelegate {
             return
         }
 
-        accumulator = ScrollAccumulator()
+        transcript = ScrollTranscript()
         contentFilter = ScrollingContentFilter()
         lastHint = .unknown
         target = nil
@@ -221,7 +225,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         // scroll rate by the harvest rate is what makes held-down keys safe.
         guard !harvestInFlight else {
             DebugLog.log("scroll \(direction) SKIPPED — harvest still in flight")
-            view?.statusText = "\(accumulator.rows.count) rows  ·  catching up…"
+            view?.statusText = "\(transcript.rows.count) rows  ·  catching up…"
             return
         }
 
@@ -269,11 +273,11 @@ final class CaptureController: NSObject, OverlayDelegate {
         // that never came. Releasing it unfiltered is the honest result — with no movement there
         // is no evidence about what was chrome.
         let held = contentFilter.flush()
-        if !held.isEmpty { accumulator.ingest(held, hint: lastHint) }
-        DebugLog.log("FINISH rows=\(accumulator.rows.count) gaps=\(accumulator.gapIndices.count) "
+        if !held.isEmpty { transcript.ingest(held, commandedDisplacement: commandedDisplacement) }
+        DebugLog.log("FINISH rows=\(transcript.rows.count) gaps=\(transcript.gapCount) "
             + "flushed=\(held.count) route=\(useHIDScroll ? "HID" : "pid")")
 
-        let rows = accumulator.rows
+        let rows = transcript.rows
         if rows.isEmpty {
             // No accessibility text at all — a canvas-rendered surface. Fall back to pixels.
             finishViaOCR(target: target)
@@ -306,8 +310,19 @@ final class CaptureController: NSObject, OverlayDelegate {
         // overlay keeps keyboard focus. Both input paths stay live at once.
         window.ignoresMouseEvents = true
 
+        // Size the scroll step to the region rather than creeping up from a small constant.
+        //
+        // Under run alignment a big step was dangerous: overshoot the shared run and the merge
+        // failed. Geometry only needs *one* row visible in both samples, so the real limit is
+        // simply "less than a viewport", and a step well under that is both safe and far faster —
+        // measured on WhatsApp, 300px captured 83 rows to 150px's 39, with no gaps either way.
+        let step = Int32(max(60, min(600, regionCG.height * 0.6)))
+        scrollStep = Scroller.AdaptiveScrollStep(
+            start: step, minimum: 20, maximum: Int32(max(80, regionCG.height * 0.85))
+        )
+
         DebugLog.log("region locked \(Int(regionCG.width))x\(Int(regionCG.height)) "
-            + "target=\(target?.appName ?? "nil") axElement=\(windowElement != nil)")
+            + "target=\(target?.appName ?? "nil") axElement=\(windowElement != nil) step=\(step)")
 
         scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             let deltaY = event.scrollingDeltaY
@@ -381,14 +396,14 @@ final class CaptureController: NSObject, OverlayDelegate {
             return
         }
         usedAX = true
-        var outcome = MergeOutcome.unchanged
+        var outcome = ScrollTranscript.Outcome.unchanged
         let releases = contentFilter.accept(snapshot)
         for release in releases {
-            outcome = accumulator.ingest(release, hint: lastHint)
+            outcome = transcript.ingest(release, commandedDisplacement: commandedDisplacement)
         }
         DebugLog.log("harvest → \(snapshot.count) rows, filter released \(releases.count) "
             + "(chrome=\(contentFilter.staticIdentities.count)), outcome=\(outcome), "
-            + "total=\(accumulator.rows.count)")
+            + "total=\(transcript.rows.count)")
         if case .unchanged = outcome {
             // Two scrolls that changed nothing means the events are not reaching the app. Switch
             // routing once, and say so — a silent switch makes the two paths impossible to tell
@@ -413,29 +428,42 @@ final class CaptureController: NSObject, OverlayDelegate {
         }
 
         switch outcome {
-        case .gap(let added):
+        case .estimated(let added, _):
+            // No shared row, so the join is unverified — this is the only way content can be
+            // missed now, and the answer is a smaller step so an anchor survives the next one.
             scrollStep.registerGap()
             if added > 0, let edge = pendingEdge { view?.noteCapturedEdge(edge) }
-        case .appended(let added, _), .prepended(let added, _):
+        case .merged(let added, _, _):
             scrollStep.registerCleanMerge()
             if added > 0, let edge = pendingEdge { view?.noteCapturedEdge(edge) }
-        case .unchanged:
+        case .seeded, .unchanged:
             break
         }
         pendingEdge = nil
-        view?.rowCount = accumulator.rows.count
+        view?.rowCount = transcript.rows.count
         updateStatus(outcome: outcome)
     }
 
-    private func updateStatus(outcome: MergeOutcome) {
-        var status = "\(accumulator.rows.count) rows"
-        if !accumulator.gapIndices.isEmpty {
-            status += "  ·  \(accumulator.gapIndices.count) gap(s) — scroll in smaller steps"
+    private func updateStatus(outcome: ScrollTranscript.Outcome) {
+        var status = "\(transcript.rows.count) rows"
+        if transcript.gapCount > 0 {
+            status += "  ·  \(transcript.gapCount) gap(s) — scroll in smaller steps"
         }
-        if case .gap = outcome {
+        if case .estimated = outcome {
             status += "  ·  skipped content, step → \(scrollStep.current)px"
         }
         view?.statusText = status
+    }
+
+    /// How far the last scroll asked the view to move, in screen-space sign (positive = content
+    /// moved down). Used only when no shared row exists to measure the true displacement.
+    private var commandedDisplacement: Double {
+        guard let direction = lastScrollDirection else { return 0 }
+        switch direction {
+        case .up: return Double(scrollStep.current)
+        case .down: return -Double(scrollStep.current)
+        case .left, .right: return 0
+        }
     }
 
     private func finishViaOCR(target: WindowTarget) {
@@ -481,7 +509,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         let document = ClipDocument(
             context: context,
             rows: rows,
-            gapIndices: accumulator.gapIndices,
+            gapIndices: transcript.gapIndices(),
             mode: mode
         )
         let markdown = document.render()

@@ -1,0 +1,192 @@
+import Testing
+@testable import OverscrollCore
+
+/// Snapshot from (text, screenY) pairs.
+private func snap(_ items: [(String, Double)]) -> [CapturedRow] {
+    items.map { CapturedRow(text: $0.0, y: $0.1) }
+}
+
+@Suite("ScrollTranscript")
+struct ScrollTranscriptTests {
+
+    @Test("first snapshot seeds document space from screen space")
+    func seeds() {
+        var transcript = ScrollTranscript()
+        let outcome = transcript.ingest(snap([("a", 10), ("b", 40)]))
+        #expect(outcome == .seeded(rows: 2))
+        #expect(transcript.rows.map(\.text) == ["a", "b"])
+    }
+
+    // The headline improvement: run matching needs `minimumOverlap` rows to join. Geometry needs
+    // one, because a single shared row fully determines the displacement.
+    @Test("a single shared row is enough to place a whole snapshot")
+    func singleAnchorSuffices() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30), ("c", 60)]))
+        // Scrolled backwards by 60: everything moves *down* the screen, so "a" is now at 60 and
+        // two earlier rows come into view above it. Only "a" is shared — one anchor.
+        let outcome = transcript.ingest(snap([("x", 0), ("y", 30), ("a", 60)]))
+
+        guard case .merged(let added, let displacement, let anchors) = outcome else {
+            Issue.record("expected merged, got \(outcome)")
+            return
+        }
+        #expect(added == 2)
+        // Negative: content moved down the screen, i.e. toward the start of the document.
+        #expect(displacement == -60)
+        #expect(anchors == 1)
+        #expect(transcript.rows.map(\.text) == ["x", "y", "a", "b", "c"])
+    }
+
+    @Test("scrolling forward appends newly revealed rows in order")
+    func scrollForward() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30), ("c", 60)]))
+        transcript.ingest(snap([("b", 0), ("c", 30), ("d", 60)]))
+        #expect(transcript.rows.map(\.text) == ["a", "b", "c", "d"])
+    }
+
+    @Test("scrolling backward places earlier rows before what we had")
+    func scrollBackward() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("c", 0), ("d", 30), ("e", 60)]))
+        transcript.ingest(snap([("a", 0), ("b", 30), ("c", 60)]))
+        #expect(transcript.rows.map(\.text) == ["a", "b", "c", "d", "e"])
+    }
+
+    // Where run matching is at its weakest and geometry at its strongest: identical text is
+    // disambiguated by position alone, with no run required.
+    @Test("repeated identical messages stay distinct by position")
+    func repeatedMessages() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("ok", 0), ("sure", 30), ("ok", 60)]))
+        // Scrolled forward 30: everything shifts up one row and "thanks" appears at the bottom.
+        // Two of the three anchors are the ambiguous "ok"; the median absorbs whichever one the
+        // nearest-candidate heuristic mismatches.
+        transcript.ingest(snap([("ok", -30), ("sure", 0), ("ok", 30), ("thanks", 60)]))
+        #expect(transcript.rows.map(\.text) == ["ok", "sure", "ok", "thanks"])
+    }
+
+    @Test("a stationary view adds nothing")
+    func stationary() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30)]))
+        let outcome = transcript.ingest(snap([("a", 0), ("b", 30)]))
+        #expect(outcome == .unchanged)
+        #expect(transcript.rows.count == 2)
+    }
+
+    @Test("sub-pixel drift does not duplicate a row")
+    func toleratesDrift() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30)]))
+        transcript.ingest(snap([("a", 0.4), ("b", 30.6)]))
+        #expect(transcript.rows.map(\.text) == ["a", "b"])
+    }
+
+    // A reflowed or resized row would drag a mean-based estimate and corrupt every later position.
+    @Test("displacement uses the median so one odd anchor cannot skew it")
+    func medianResistsOutlier() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30), ("c", 60), ("d", 90)]))
+        // a, b, c all moved up 20; "d" reflowed and appears to have moved 200.
+        let outcome = transcript.ingest(snap([("a", -20), ("b", 10), ("c", 40), ("d", -110)]))
+        guard case .merged(_, let displacement, _) = outcome else {
+            Issue.record("expected merged, got \(outcome)")
+            return
+        }
+        #expect(displacement == 20)
+    }
+
+    @Test("no shared row falls back to the commanded displacement and records a gap")
+    func estimatesWhenNoAnchor() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30)]))
+        let outcome = transcript.ingest(snap([("y", 0), ("z", 30)]), commandedDisplacement: 400)
+        guard case .estimated(let added, let assumed) = outcome else {
+            Issue.record("expected estimated, got \(outcome)")
+            return
+        }
+        #expect(added == 2)
+        #expect(assumed == 400)
+        #expect(transcript.gapCount == 1)
+        #expect(transcript.rows.map(\.text) == ["a", "b", "y", "z"])
+    }
+
+    // A gap is a hole in document space, not merely a large offset change. Content can travel a
+    // long way and still land flush against what we already had, in which case nothing was missed
+    // and recording a gap would be a lie.
+    @Test("a large displacement that lands flush records no gap")
+    func largeDisplacementWithoutVoidIsNotAGap() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30), ("shared", 60)]))
+        // "shared" moved 500pt, but the new row sits directly after it in the document.
+        transcript.ingest(snap([("shared", -440), ("far", -410)]))
+        #expect(transcript.gapCount == 0)
+        #expect(transcript.rows.map(\.text) == ["a", "b", "shared", "far"])
+    }
+
+    // The key property, stated as a test: an anchor is a row visible in *both* viewports, so its
+    // existence proves they overlap and nothing passed between them. A measured merge therefore
+    // cannot have skipped content, however far the offset moved.
+    @Test("a measured merge never records a gap, however large the displacement")
+    func measuredMergeIsNeverAGap() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30), ("shared", 60)]))
+        transcript.ingest(snap([("shared", -940), ("far", -910)]))
+        #expect(transcript.gapCount == 0)
+    }
+
+    @Test("a long scroll reconstructs the source exactly with no gaps")
+    func longScrollRoundTrip() {
+        let source = (1...120).map { "message \($0)" }
+        var transcript = ScrollTranscript()
+        let rowHeight = 24.0
+
+        var offset = 0
+        while offset < source.count {
+            let window = Array(source[offset..<min(offset + 20, source.count)])
+            let rows = window.enumerated().map { index, text in
+                // Content scrolls up as the viewport advances.
+                CapturedRow(text: text, y: Double(index) * rowHeight - Double(offset) * rowHeight)
+            }
+            transcript.ingest(rows)
+            offset += 12
+        }
+
+        #expect(transcript.rows.map(\.text) == source)
+        #expect(transcript.gapCount == 0)
+    }
+
+    // The case that defeats run matching entirely: a viewport exposing only two rows can never
+    // produce a run of three, so every merge degrades to a gap.
+    @Test("a viewport too small to form a run still merges cleanly")
+    func tinyViewport() {
+        let source = (1...30).map { "row \($0)" }
+        var transcript = ScrollTranscript()
+        let rowHeight = 40.0
+
+        var offset = 0
+        while offset < source.count {
+            let window = Array(source[offset..<min(offset + 2, source.count)])
+            let rows = window.enumerated().map { index, text in
+                CapturedRow(text: text, y: Double(index) * rowHeight - Double(offset) * rowHeight)
+            }
+            transcript.ingest(rows)
+            offset += 1
+        }
+
+        #expect(transcript.rows.map(\.text) == source)
+        #expect(transcript.gapCount == 0)
+    }
+
+    @Test("gap indices point at the row preceding the skipped span")
+    func gapIndicesPlacement() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(snap([("a", 0), ("b", 30)]))
+        transcript.ingest(snap([("y", 0), ("z", 30)]), commandedDisplacement: 400)
+        let indices = transcript.gapIndices()
+        #expect(indices.count == 1)
+        #expect(transcript.rows[indices[0]].text == "b")
+    }
+}
