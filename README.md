@@ -160,6 +160,24 @@ Measured against WhatsApp, not assumed. All of these changed the design:
    gaps to **zero at every step size tested**, and the step became a throughput knob instead of a
    correctness one.
 
+## Browsers and Electron apps
+
+Chromium-based apps (Chrome, Edge, Arc, Helium, and Electron apps like Slack or VS Code) **do not
+build their web-content accessibility tree until an assistive technology asks for it** — it is
+expensive to maintain, so it stays off. Before that request, a browser window reports a window
+element with *no children at all*, which is indistinguishable from "this app has no text".
+
+Overscroll sets both opt-in attributes on every target: `AXManualAccessibility` (added by Chromium
+specifically for automation tools that aren't screen readers) and `AXEnhancedUserInterface` (the
+long-standing VoiceOver signal that Electron and several native apps honour). They are harmless
+no-ops on apps that already expose a full tree.
+
+The tree is then built **asynchronously**, so the harvest immediately following a region lock can
+still land before it exists. Overscroll re-harvests at 0.35s, 0.9s and 1.8s while the read is still
+empty, and stops as soon as rows arrive.
+
+Measured on a Chromium browser: 1 node → 458 nodes, and 6 captured rows → 76, after these two fixes.
+
 ## Design notes
 
 **Gaps are marked, never hidden.** A gap means no row was shared between two samples, so the
@@ -242,8 +260,7 @@ Known rough edges:
 
 - Adaptive stepping backs off after a gap, so a run of keypresses may cover less ground than the
   region-sized default would.
-- Only WhatsApp has been tested seriously. Slack, Messages, Mail and browsers are unverified — run
-  `axprobe` against them and check the REJECTED roles list first.
+- Tested against WhatsApp and a Chromium browser. Slack, Messages and Mail are unverified — run `axprobe` against them and check the REJECTED roles list first.
 - The OCR fallback has not been exercised against a real canvas-rendered app.
 - The UI layer has no test coverage; it is AppKit drawing and event handling.
 

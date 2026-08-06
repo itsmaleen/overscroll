@@ -78,6 +78,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         windowElement = nil
         regionCG = .zero
         usedOCR = false
+        lastSnapshotRowCount = 0
         usedAX = false
         scrollsSinceChange = 0
         useHIDScroll = false
@@ -324,6 +325,8 @@ final class CaptureController: NSObject, OverlayDelegate {
         DebugLog.log("region locked \(Int(regionCG.width))x\(Int(regionCG.height)) "
             + "target=\(target?.appName ?? "nil") axElement=\(windowElement != nil) step=\(step)")
 
+        scheduleTreeWarmup()
+
         scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             let deltaY = event.scrollingDeltaY
             let deltaX = event.scrollingDeltaX
@@ -345,6 +348,30 @@ final class CaptureController: NSObject, OverlayDelegate {
             }
         }
         harvestNow()
+    }
+
+    /// Rows returned by the most recent harvest, before filtering.
+    private var lastSnapshotRowCount = 0
+
+    /// Re-harvest a few times if the first read comes back empty.
+    ///
+    /// Chromium and Electron apps build their web-content accessibility tree *asynchronously* after
+    /// being asked for it, so the harvest that immediately follows locking a region can land before
+    /// the tree exists — a browser then captures nothing at all, which is exactly how browsers came
+    /// to look unsupported. Measured on a Chromium browser: the read right after the request saw a
+    /// window with no children, and a moment later the same window exposed hundreds of nodes.
+    ///
+    /// Self-limiting: each retry is skipped once any rows have arrived.
+    private func scheduleTreeWarmup() {
+        for delay in [0.35, 0.9, 1.8] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.isActive, self.lastSnapshotRowCount == 0 else { return }
+                    DebugLog.log("tree warmup retry at \(delay)s")
+                    self.harvestNow()
+                }
+            }
+        }
     }
 
     /// Coalesce harvests: a trackpad flick emits dozens of scroll events, and the app needs a beat
@@ -391,6 +418,7 @@ final class CaptureController: NSObject, OverlayDelegate {
     }
 
     private func ingest(_ snapshot: [CapturedRow]) {
+        lastSnapshotRowCount = snapshot.count
         guard !snapshot.isEmpty else {
             DebugLog.log("harvest → 0 rows")
             return

@@ -25,11 +25,6 @@ public enum AXHarvester {
         "AXValueIndicator", "AXHeading", "AXCell", "AXMenuItem",
     ]
 
-    /// Resolve the accessibility element for a window we found via the window server.
-    ///
-    /// There is no public API mapping a `CGWindowID` to an `AXUIElement`, so this matches on
-    /// geometry: the app's AX windows are compared against the known bounds. Ambiguity is rare
-    /// because two windows of one app seldom share an origin and size exactly.
     /// Ceiling on any single accessibility request, in seconds.
     ///
     /// These calls are synchronous IPC into another process. The default has no useful bound, so a
@@ -38,10 +33,16 @@ public enum AXHarvester {
     /// timeout converts a hang into a few missing rows.
     private static let messagingTimeout: Float = 0.4
 
+    /// Resolve the accessibility element for a window we found via the window server.
+    ///
+    /// There is no public API mapping a `CGWindowID` to an `AXUIElement`, so this matches on
+    /// geometry: the app's AX windows are compared against the known bounds. Ambiguity is rare
+    /// because two windows of one app seldom share an origin and size exactly.
     public static func windowElement(for target: WindowTarget) -> AXUIElement? {
         let app = AXUIElementCreateApplication(target.pid)
         // Applies to every message sent to this application, including via derived elements.
         AXUIElementSetMessagingTimeout(app, messagingTimeout)
+        enableFullAccessibility(for: app)
         guard let windows = copyValue(app, kAXWindowsAttribute) as? [AXUIElement] else {
             return nil
         }
@@ -62,6 +63,80 @@ public enum AXHarvester {
         guard let best, best.distance < 20 else { return windows.first }
         AXUIElementSetMessagingTimeout(best.element, messagingTimeout)
         return best.element
+    }
+
+    /// Ask an application to build its full accessibility tree.
+    ///
+    /// Chromium and Electron apps do not populate web-content accessibility until an assistive
+    /// technology signals that it needs it — the tree is expensive to maintain, so it stays off by
+    /// default. Without this a browser window reports a window element with **no children at all**,
+    /// which is indistinguishable from "this app has no text" and was exactly why browsers appeared
+    /// unsupported.
+    ///
+    /// Two attributes, because the apps disagree on which they honour:
+    /// - `AXEnhancedUserInterface` is the long-standing signal set by VoiceOver; Electron and
+    ///   several native apps respond to it.
+    /// - `AXManualAccessibility` was added by Chromium specifically for automation tools that are
+    ///   not screen readers, precisely this case.
+    ///
+    /// Both are set unconditionally: they are harmless no-ops on apps that already expose a full
+    /// tree, and there is no reliable way to detect in advance which an app needs.
+    public static func enableFullAccessibility(for app: AXUIElement) {
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+
+    /// Whether the element currently exposes any children — used to decide whether an app needs a
+    /// moment after being asked to build its tree.
+    public static func hasChildren(_ element: AXUIElement) -> Bool {
+        guard let children = copyValue(element, kAXChildrenAttribute) as? [AXUIElement] else {
+            return false
+        }
+        return !children.isEmpty
+    }
+
+    /// One line per element for a structural dump of the tree.
+    public struct TreeNode: Sendable {
+        public let depth: Int
+        public let role: String
+        public let text: String?
+        public let childCount: Int
+        public let frame: CGRect?
+    }
+
+    /// Walk the tree recording structure rather than content.
+    ///
+    /// When a harvest comes back empty the question is *where the content isn't* — a browser that
+    /// returns only its toolbar looks identical to one whose web area is nested somewhere the walk
+    /// never reached. Roles and child counts answer that; extracted text does not.
+    public static func dumpTree(
+        element: AXUIElement, maxDepth limit: Int = 12, maxNodes cap: Int = 400
+    ) -> [TreeNode] {
+        var nodes: [TreeNode] = []
+        var visited = 0
+        walk(element: element, depth: 0, limit: limit, cap: cap, visited: &visited, into: &nodes)
+        return nodes
+    }
+
+    private static func walk(
+        element: AXUIElement, depth: Int, limit: Int, cap: Int,
+        visited: inout Int, into nodes: inout [TreeNode]
+    ) {
+        guard depth <= limit, visited < cap else { return }
+        visited += 1
+
+        let role = (copyValue(element, kAXRoleAttribute) as? String) ?? "AXUnknown"
+        let children = (copyValue(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        nodes.append(TreeNode(
+            depth: depth,
+            role: role,
+            text: text(of: element).map { String($0.prefix(60)) },
+            childCount: children.count,
+            frame: frame(of: element)
+        ))
+        for child in children {
+            walk(element: child, depth: depth + 1, limit: limit, cap: cap, visited: &visited, into: &nodes)
+        }
     }
 
     /// Harvest off the main thread.
@@ -159,41 +234,25 @@ public enum AXHarvester {
         diagnostics.hitNodeCap = visited >= maxNodes
         diagnostics.containersFound = containers.count
 
-        let selected = dominant(containers: containers, rows: rows)
-        diagnostics.selectedContainer = selected
-        if let selected {
-            let discarded = rows.count { $0.container != selected }
-            diagnostics.rowsOutsideDominantContainer = discarded
-            rows = rows.filter { $0.container == selected }
-        }
-
+        // Rows are deliberately NOT filtered to a "dominant" scroll area any more.
+        //
+        // That heuristic existed to separate a sidebar from a message list, picking whichever
+        // container covered most of the region. Two things killed it. WhatsApp exposes no scroll
+        // areas at all, so it never fired where it was designed to help; and in a browser it fired
+        // and was *wrong* — scroll areas nest, rows get tagged with the innermost, and coverage
+        // picks an outer one, so a PDF's text was discarded as "outside the dominant container"
+        // (19 of 25 rows).
+        //
+        // `ScrollingContentFilter` solves the same problem from a better angle — content that
+        // scrolls moves, chrome doesn't — and needs no cooperation from the app's tree. The
+        // container count is still reported, because knowing a region spans several independently
+        // scrolling areas is useful when diagnosing a capture.
         diagnostics.linksFound = rows.reduce(0) { $0 + $1.row.links.count }
         rows.sort { lhs, rhs in
             if abs(lhs.y - rhs.y) < 4 { return lhs.x < rhs.x }
             return lhs.y < rhs.y
         }
         return (rows.map(\.row), diagnostics)
-    }
-
-    /// Pick the scroll area the user most likely meant: the one covering the most of the selected
-    /// region. Chosen over "the one with the most rows" because coverage is a property of the
-    /// layout and stays fixed while scrolling, whereas row counts change as content virtualizes —
-    /// and a criterion that flips mid-capture would resegment the transcript.
-    private static func dominant(containers: [Container], rows: [PositionedRow]) -> Int? {
-        let populated = Set(rows.compactMap(\.container))
-        let usable = containers.filter { populated.contains($0.index) }
-        guard !usable.isEmpty else { return nil }
-
-        // With only one populated scroll area there is nothing to disambiguate, and rows sitting
-        // outside it (static headers) are worth keeping.
-        guard usable.count > 1 else { return nil }
-
-        return usable.max { lhs, rhs in
-            if abs(lhs.coverage - rhs.coverage) > 1 { return lhs.coverage < rhs.coverage }
-            let lhsRows = rows.count { $0.container == lhs.index }
-            let rhsRows = rows.count { $0.container == rhs.index }
-            return lhsRows < rhsRows
-        }?.index
     }
 
     /// Depth-first walk. Returns true when this subtree produced any row.

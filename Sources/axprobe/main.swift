@@ -139,9 +139,12 @@ if options.listWindows || options.appName.isEmpty {
     exit(0)
 }
 
-guard let target = windows.first(where: {
-    $0.appName.localizedCaseInsensitiveContains(options.appName)
-}) else {
+// Largest match, not frontmost. Browsers put toolbars and panels in their own small windows that
+// sit in front of the content window, so "first match" reliably picks the wrong one.
+guard let target = windows
+    .filter({ $0.appName.localizedCaseInsensitiveContains(options.appName) })
+    .max(by: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height })
+else {
     print("✗ No on-screen window for '\(options.appName)'. Run with --list to see what's available.")
     exit(1)
 }
@@ -149,6 +152,12 @@ guard let target = windows.first(where: {
 print("Target: \(target.appName) — \(target.title ?? "(untitled)")")
 print("Bounds: \(Int(target.bounds.width))x\(Int(target.bounds.height)) @ (\(Int(target.bounds.minX)),\(Int(target.bounds.minY)))")
 print("PID:    \(target.pid)\n")
+
+// Building a web-content tree is not instant; give the app a beat after being asked.
+if let probe = AXHarvester.windowElement(for: target), !AXHarvester.hasChildren(probe) {
+    print("(window exposed no children — waiting for the accessibility tree to build)")
+    RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+}
 
 guard let element = AXHarvester.windowElement(for: target) else {
     print("✗ Could not resolve an accessibility element for that window.")
@@ -161,6 +170,21 @@ var adaptiveStep = Scroller.AdaptiveScrollStep()
 /// Run both merge strategies over the identical snapshot stream, so the comparison is not
 /// confounded by the target having scrolled differently between two separate runs.
 var transcript = ScrollTranscript()
+if CommandLine.arguments.contains("--tree") {
+    let depth = CommandLine.arguments.firstIndex(of: "--tree-depth")
+        .flatMap { $0 + 1 < CommandLine.arguments.count ? Int(CommandLine.arguments[$0 + 1]) : nil } ?? 12
+    let cap = CommandLine.arguments.firstIndex(of: "--tree-cap")
+        .flatMap { $0 + 1 < CommandLine.arguments.count ? Int(CommandLine.arguments[$0 + 1]) : nil } ?? 400
+    print("\n=== accessibility tree structure (depth \(depth), cap \(cap)) ===")
+    for node in AXHarvester.dumpTree(element: element, maxDepth: depth, maxNodes: cap) {
+        let indent = String(repeating: "  ", count: node.depth)
+        let size = node.frame.map { "\(Int($0.width))x\(Int($0.height))" } ?? "—"
+        let snippet = node.text.map { " \"\($0.replacingOccurrences(of: "\n", with: " "))\"" } ?? ""
+        print("\(indent)\(node.role) [\(node.childCount)] \(size)\(snippet)")
+    }
+    exit(0)
+}
+
 let region: CGRect
 if let fractions = options.regionFractions {
     let bounds = target.bounds
