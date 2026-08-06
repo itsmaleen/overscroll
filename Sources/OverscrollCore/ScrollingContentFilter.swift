@@ -21,7 +21,14 @@ public struct ScrollingContentFilter: Sendable {
     public let tolerance: Double
 
     public private(set) var staticIdentities: Set<String> = []
-    private var lastPositions: [String: Double] = [:]
+    /// All positions each identity was seen at, not just one.
+    ///
+    /// Keeping a single position per identity is wrong wherever text repeats, and forms repeat text
+    /// constantly — a field's label and its own placeholder are usually identical, so "Github URL"
+    /// occupies two rows at different heights. With one stored position the comparison lands on the
+    /// wrong instance, the row looks stationary, and *both* instances are blacklisted as chrome.
+    /// Observed on a job application: entire snapshots (29 of 29 rows) discarded that way.
+    private var lastPositions: [String: [Double]] = [:]
     /// The snapshot held back awaiting evidence of movement. Cleared once the first release
     /// happens, after which snapshots stream straight through.
     private var pending: [CapturedRow]?
@@ -34,25 +41,29 @@ public struct ScrollingContentFilter: Sendable {
     /// Feed one snapshot. Returns the snapshots ready to be ingested, in order — empty while the
     /// first is still held for comparison, two on the release that ends the hold, one thereafter.
     public mutating func accept(_ snapshot: [CapturedRow]) -> [[CapturedRow]] {
-        defer {
-            lastPositions = Dictionary(
-                snapshot.map { ($0.identity, $0.y) }, uniquingKeysWith: { first, _ in first }
-            )
-        }
+        let currentPositions = positionsByIdentity(snapshot)
+        defer { lastPositions = currentPositions }
 
-        let shared = snapshot.compactMap { row -> (CapturedRow, Double)? in
-            guard let previous = lastPositions[row.identity] else { return nil }
-            return (row, previous)
+        // Compare each identity's *whole set* of positions. An identity counts as stationary only
+        // if every instance of it is where it was, which is the only reading that survives repeated
+        // text.
+        var movedAny = false
+        var stationary: [String] = []
+        for (identity, positions) in currentPositions {
+            guard let previous = lastPositions[identity] else { continue }
+            if positionsMatch(previous, positions) {
+                stationary.append(identity)
+            } else {
+                movedAny = true
+            }
         }
-        let moved = shared.contains { abs($0.0.y - $0.1) > tolerance }
 
         // Only learn from a snapshot that demonstrably moved. If nothing moved, the view didn't
         // scroll — and every row would look static, which would blacklist the entire capture.
-        if moved {
-            for (row, previous) in shared where abs(row.y - previous) <= tolerance {
-                staticIdentities.insert(row.identity)
-            }
+        if movedAny {
+            for identity in stationary { staticIdentities.insert(identity) }
         }
+        let moved = movedAny
 
         // Steady state: classification is already under way, so pass snapshots straight through.
         if hasReleased { return [strip(snapshot)] }
@@ -82,6 +93,19 @@ public struct ScrollingContentFilter: Sendable {
         defer { pending = nil }
         guard let held = pending else { return [] }
         return strip(held)
+    }
+
+    private func positionsByIdentity(_ snapshot: [CapturedRow]) -> [String: [Double]] {
+        var grouped: [String: [Double]] = [:]
+        for row in snapshot { grouped[row.identity, default: []].append(row.y) }
+        for key in grouped.keys { grouped[key]?.sort() }
+        return grouped
+    }
+
+    /// Whether two position sets describe the same, unmoved rows.
+    private func positionsMatch(_ lhs: [Double], _ rhs: [Double]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { abs($0 - $1) <= tolerance }
     }
 
     /// Filter an already-released snapshot with the current knowledge of what is static.

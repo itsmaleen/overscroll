@@ -338,6 +338,10 @@ final class CaptureController: NSObject, OverlayDelegate {
                 if abs(deltaY) >= abs(deltaX), deltaY != 0 {
                     self.lastHint = deltaY > 0 ? .towardStart : .towardEnd
                     self.pendingEdge = deltaY > 0 ? .top : .bottom
+                    // A trackpad delta is already in screen space and already carries the right
+                    // sign, so it needs no inversion: a positive deltaY means content moved down.
+                    self.lastScrollDirection = nil
+                    self.trackpadDisplacement = deltaY
                 } else if deltaX != 0 {
                     self.lastHint = .unknown
                     self.pendingEdge = deltaX > 0 ? .left : .right
@@ -499,16 +503,29 @@ final class CaptureController: NSObject, OverlayDelegate {
         view?.statusText = status
     }
 
-    /// How far the last scroll asked the view to move, in screen-space sign (positive = content
-    /// moved down). Used only when no shared row exists to measure the true displacement.
+    /// How far the last scroll asked the view to move, used only when no shared row exists to
+    /// measure the true displacement.
+    ///
+    /// The sign must match what `ScrollTranscript` computes from anchors, and it is the opposite of
+    /// what "scroll down" suggests. Scrolling **down** moves content **up** the screen, so a row
+    /// that was at y=300 reappears at y=88 and the offset has to grow by +212 to keep its document
+    /// position fixed. Getting this backwards is not a small error: the offset then moves the wrong
+    /// way by twice the step on every unanchored merge, scattering rows far from where they belong.
     private var commandedDisplacement: Double {
-        guard let direction = lastScrollDirection else { return 0 }
+        guard let direction = lastScrollDirection else { return trackpadDisplacement }
         switch direction {
-        case .up: return Double(scrollStep.current)
-        case .down: return -Double(scrollStep.current)
+        case .up: return -Double(scrollStep.current)
+        case .down: return Double(scrollStep.current)
         case .left, .right: return 0
         }
     }
+
+    /// Displacement of the most recent trackpad scroll, from the event's own delta.
+    ///
+    /// Without this a manual scroll had no fallback at all — `lastScrollDirection` is only set by
+    /// the keyboard path, so an unanchored trackpad merge assumed zero movement and stacked the new
+    /// rows on top of the old ones.
+    private var trackpadDisplacement: Double = 0
 
     private func finishViaOCR(target: WindowTarget) {
         guard Permissions.hasScreenRecording else {

@@ -72,6 +72,21 @@ public struct ClipDocument: Sendable {
     }
 
     private func line(for row: CapturedRow) -> String {
+        // Controls render as their form meaning rather than as bare labels. On a form the answer
+        // *is* the selection state, so "Software Engineering" and "Research" are indistinguishable
+        // without it — and which one is chosen is usually the only part worth capturing.
+        if let isSelected = row.isSelected {
+            return "- [\(isSelected ? "x" : " ")] \(row.text)"
+        }
+        switch row.role {
+        case "AXButton", "AXPopUpButton":
+            return "[\(row.text)]"
+        case "AXHeading":
+            return "## \(row.text)"
+        default:
+            break
+        }
+
         // A link row whose text differs from its target is written as a real markdown link, which
         // is the payload the pixel path structurally cannot produce.
         if row.role == "AXLink", let target = row.links.first {

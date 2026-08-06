@@ -20,10 +20,26 @@ public enum AXHarvester {
     /// Spelled as literals rather than the `kAX…Role` constants because two of the roles that
     /// matter most here — `AXLink` and `AXHeading` — are emitted by WebKit and web-derived views
     /// but never declared in the ApplicationServices headers.
-    private static let textRoles: Set<String> = [
+    private static let textRoles: Set<String> = Set([
         "AXStaticText", "AXTextField", "AXTextArea", "AXLink",
         "AXValueIndicator", "AXHeading", "AXCell", "AXMenuItem",
+    ]).union(formRoles)
+
+    /// Interactive controls whose labels are content, not chrome.
+    ///
+    /// Excluding these was defensible for a chat window, where buttons are toolbar furniture. It is
+    /// wrong for a form, which is mostly controls: dropping them turned a job application into a
+    /// list of field labels with every question's options and answers missing.
+    ///
+    /// The cost is that genuine chrome (toolbar buttons, tab titles) now enters the capture too.
+    /// That is the better trade, because `ScrollingContentFilter` removes anything that does not
+    /// move with the content, and chrome by definition does not.
+    private static let formRoles: Set<String> = [
+        "AXRadioButton", "AXCheckBox", "AXButton", "AXPopUpButton", "AXComboBox", "AXSwitch",
     ]
+
+    /// Roles where selection state carries the actual answer.
+    private static let selectableRoles: Set<String> = ["AXRadioButton", "AXCheckBox", "AXSwitch"]
 
     /// Ceiling on any single accessibility request, in seconds.
     ///
@@ -333,7 +349,8 @@ public enum AXHarvester {
             row: CapturedRow(
                 text: text, role: role,
                 links: links(of: element, text: text),
-                y: Double(elementFrame.minY)
+                y: Double(elementFrame.minY),
+                isSelected: selectableRoles.contains(role) ? selectionState(of: element) : nil
             ),
             y: Double(elementFrame.minY),
             x: Double(elementFrame.minX),
@@ -382,6 +399,17 @@ public enum AXHarvester {
             let cleaned = clean(desc)
             if !cleaned.isEmpty { return cleaned }
         }
+        return nil
+    }
+
+    /// Whether a control is on.
+    ///
+    /// `AXValue` for a toggle is a number, not a string — which is why `text(of:)` falls through to
+    /// the title and the label is captured rather than "1". Read separately here.
+    private static func selectionState(of element: AXUIElement) -> Bool? {
+        guard let value = copyValue(element, kAXValueAttribute) else { return nil }
+        if let number = value as? NSNumber { return number.intValue != 0 }
+        if let flag = value as? Bool { return flag }
         return nil
     }
 

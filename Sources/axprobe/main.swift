@@ -229,8 +229,9 @@ if let direction = options.scrollDirection, options.scrollCount > 0 {
         RunLoop.current.run(until: Date().addingTimeInterval(0.35))
         let (stepRows, _) = AXHarvester.harvestWithDiagnostics(window: element, region: region)
         let hint: ScrollHint = (direction == .up) ? .towardStart : .towardEnd
-        // Sign matches screen space: scrolling toward the start moves content down (positive).
-        let commanded = Double(effectiveStep) * (direction == .up ? 1 : -1)
+        // Sign must match what anchors produce: scrolling *down* moves content *up* the screen, so
+        // the offset grows. Inverting this scatters unanchored rows by twice the step.
+        let commanded = Double(effectiveStep) * (direction == .up ? -1 : 1)
         let releases = contentFilter.accept(stepRows)
         var outcomes: [MergeOutcome] = []
         for release in releases {

@@ -124,3 +124,45 @@ struct ScrollingContentFilterTests {
         #expect(!filtered.rows.contains { $0.text == "SIDEBAR" })
     }
 }
+
+@Suite("ScrollingContentFilter with repeated text")
+struct ScrollingContentFilterRepeatedTextTests {
+
+    private func rows(_ items: [(String, Double)]) -> [CapturedRow] {
+        items.map { CapturedRow(text: $0.0, y: $0.1) }
+    }
+
+    // Forms repeat text constantly: a field's label and its own placeholder are usually identical.
+    // Storing one position per identity lands the comparison on the wrong instance, the row looks
+    // stationary, and both instances are blacklisted — observed discarding whole snapshots.
+    @Test("repeated text that moves is not mistaken for chrome")
+    func repeatedMovingTextIsNotChrome() {
+        var filter = ScrollingContentFilter()
+        // "Github URL" appears twice — as a label and as its field — 20pt apart.
+        _ = filter.accept(rows([("nav", 5), ("Github URL", 100), ("Github URL", 120)]))
+        let released = filter.accept(rows([("nav", 5), ("Github URL", 200), ("Github URL", 220)]))
+
+        #expect(filter.staticIdentities == ["nav"])
+        #expect(released.allSatisfy { $0.contains { $0.text == "Github URL" } })
+    }
+
+    // The inverse must still hold: repeated text that genuinely doesn't move is chrome.
+    @Test("repeated text that stays put is still chrome")
+    func repeatedStationaryTextIsChrome() {
+        var filter = ScrollingContentFilter()
+        _ = filter.accept(rows([("tab", 5), ("tab", 25), ("body", 100)]))
+        let released = filter.accept(rows([("tab", 5), ("tab", 25), ("body", 300)]))
+        #expect(filter.staticIdentities.contains("tab"))
+        #expect(released.allSatisfy { !$0.contains { $0.text == "tab" } })
+    }
+
+    // A partial match must not read as stationary: one instance moving means the identity moved.
+    @Test("an identity is stationary only if every instance is")
+    func partialMovementIsNotStationary() {
+        var filter = ScrollingContentFilter()
+        _ = filter.accept(rows([("dup", 50), ("dup", 100), ("other", 200)]))
+        // First "dup" held position, second moved.
+        _ = filter.accept(rows([("dup", 50), ("dup", 400), ("other", 500)]))
+        #expect(!filter.staticIdentities.contains("dup"))
+    }
+}

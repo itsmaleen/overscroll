@@ -16,11 +16,25 @@ public struct CapturedRow: Sendable, Equatable, Codable {
     /// meaningless across snapshots because the content moves.
     public let y: Double
 
-    public init(text: String, role: String = "AXStaticText", links: [String] = [], y: Double = 0) {
+    /// Selection state for controls that have one — radio buttons, checkboxes, toggles.
+    ///
+    /// Captured because on a form the *answer* is the state, not the label: "Software Engineering"
+    /// and "Research" read identically without it, and which one is selected is the only part worth
+    /// having. `nil` for elements where selection is not a meaningful concept.
+    public let isSelected: Bool?
+
+    public init(
+        text: String,
+        role: String = "AXStaticText",
+        links: [String] = [],
+        y: Double = 0,
+        isSelected: Bool? = nil
+    ) {
         self.text = text
         self.role = role
         self.links = links
         self.y = y
+        self.isSelected = isSelected
     }
 
     /// Normalized comparison key: collapsed whitespace, case-folded.
