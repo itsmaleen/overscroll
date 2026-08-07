@@ -62,6 +62,8 @@ free hand. Both work, in every state:
 | drag | draw the capture region |
 | `Space` | toggle whole-window picking instead of dragging |
 | `W` `A` `S` `D` / arrows | scroll the target |
+| `G` | auto-scroll to the end, unattended |
+| `O` | read pixels (OCR) instead of the accessibility tree |
 | `I` | keep the image alongside the markdown |
 | `Return` | finish — markdown to clipboard + `~/Documents/Overscroll/` |
 | `Esc` | cancel |
@@ -196,6 +198,24 @@ exists for content with no export path; a spreadsheet has an excellent one.
 The same reasoning applies to Figma, Google Docs, remote desktops, and games. Where there is no
 tree, the OCR fallback is the only route — and it currently captures a single screenful without
 scrolling, so it is not yet a real answer for long canvas content.
+
+### Auto-scroll
+
+`G` scrolls to the end on its own. Each step is issued from the **completion of the previous
+harvest** rather than on a timer, so the scroll structurally cannot outrun the read — which is the
+failure a person cannot avoid by hand: a fast flick produced 3-row reads on a page where a paused
+one produced 15.
+
+It stops after three consecutive steps that add nothing. Three rather than one, because a single
+barren step is common mid-document — a figure, a wide table, a stretch OCR fails on — and stopping
+there would end the capture in the middle with no sign anything was missed. A step ceiling backstops
+infinite feeds, where the stale rule would never fire, and the two stops report different reasons
+because "reached the end" and "hit the limit" mean different things about completeness.
+
+While it runs, `Esc` stops the scroll rather than discarding the capture; a second `Esc` cancels.
+
+Measured on a full Wikipedia article via the pixel path: **828 rows, 0 gaps, stopped after 28 steps**
+having correctly detected the end.
 
 ### OCR consensus
 
