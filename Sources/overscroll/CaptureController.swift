@@ -93,6 +93,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         trackpadDisplacement = 0
         trackpadHorizontal = 0
         harvestQueued = false
+        harvestModeDecided = false
         view?.ocrMode = false
 
         let frame = NSScreen.screens.reduce(NSRect.zero) { $0.union($1.frame) }
@@ -382,6 +383,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         DebugLog.log("region locked \(Int(regionCG.width))x\(Int(regionCG.height)) "
             + "target=\(target?.appName ?? "nil") axElement=\(windowElement != nil) step=\(step)")
 
+        lockedAt = Date()
         scheduleTreeWarmup()
 
         scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -483,6 +485,12 @@ final class CaptureController: NSObject, OverlayDelegate {
                     self.harvestViaOCR()
                     return
                 }
+                // Decide once, from evidence, rather than making the user notice and press a key.
+                if !self.harvestModeDecided, self.readyToDecideMode {
+                    self.harvestModeDecided = true
+                    self.decideHarvestMode(axSnapshot: snapshot)
+                    return
+                }
                 self.harvestInFlight = false
                 self.currentHarvestWasOCR = false
                 self.ingest(snapshot)
@@ -517,6 +525,66 @@ final class CaptureController: NSObject, OverlayDelegate {
     /// Scrolls issued since the transcript last gained a row.
     private var scrollsWithoutGrowth = 0
     private var rowCountAtLastScroll = 0
+
+    private var harvestModeDecided = false
+    private var lockedAt = Date()
+
+    /// A Chromium tree is still being built for the first moment after it is asked for, so an
+    /// immediate read says nothing about whether the app *has* one. Wait for the warmup window
+    /// before judging — unless rows have already arrived, which settles it early.
+    private var readyToDecideMode: Bool {
+        lastSnapshotRowCount > 0 || Date().timeIntervalSince(lockedAt) >= 0.8
+    }
+
+    /// An accessibility read this size is clearly working; no need to spend an OCR pass comparing.
+    private static let axClearlyWorkingRows = 12
+
+    /// Choose between the tree and the pixels by running both once and comparing.
+    ///
+    /// A ratio, not a raw count. "Whichever returns more rows" would be wrong: OCR sees timestamps,
+    /// avatars and chrome that the tree sensibly omits, so it can out-count a perfectly good
+    /// accessibility read and would drag WhatsApp onto the pixel path — losing real link targets and
+    /// exact text for nothing. Only a landslide indicates the tree is genuinely blind, which is what
+    /// a canvas app looks like: measured on a Google Doc, 4 rows against 49.
+    private func decideHarvestMode(axSnapshot: [CapturedRow]) {
+        guard Permissions.hasScreenRecording,
+              axSnapshot.count < Self.axClearlyWorkingRows,
+              let target
+        else {
+            harvestInFlight = false
+            currentHarvestWasOCR = false
+            ingest(axSnapshot)
+            return
+        }
+
+        Task { @MainActor in
+            let capture = await OCRHarvester.capture(
+                target: target, region: self.regionCG, keepImage: false
+            )
+            self.harvestInFlight = false
+            let ocrWins = capture.rows.count >= max(8, axSnapshot.count * 3)
+            DebugLog.log(
+                "mode decision: ax=\(axSnapshot.count) ocr=\(capture.rows.count) "
+                + "→ \(ocrWins ? "OCR" : "accessibility")"
+            )
+
+            guard ocrWins else {
+                self.currentHarvestWasOCR = false
+                self.ingest(axSnapshot)
+                return
+            }
+            // Switch wholesale. Mixing the two sources mid-capture would put the same content into
+            // the transcript twice, in two different spellings, at two different positions.
+            self.forceOCR = true
+            self.view?.ocrMode = true
+            self.transcript = ScrollTranscript()
+            self.contentFilter = ScrollingContentFilter()
+            self.usedOCR = true
+            self.currentHarvestWasOCR = true
+            Notifier.info("No text in the accessibility tree — reading pixels")
+            self.ingest(capture.rows)
+        }
+    }
 
     private func harvestViaOCR() {
         guard let target else {
