@@ -13,6 +13,7 @@ protocol OverlayDelegate: AnyObject {
     func overlayDidFinish()
     func overlayDidCancel()
     func overlayDidToggleWindowPicking()
+    func overlayDidToggleAutoScroll()
     func overlayDidToggleOCR()
     func overlayDidToggleKeepImage()
 }
@@ -82,6 +83,8 @@ final class OverlayView: NSView {
     var rowCount: Int = 0 { didSet { needsDisplay = true } }
     /// Whether the capture is reading pixels rather than the accessibility tree.
     var ocrMode: Bool = false { didSet { needsDisplay = true } }
+    /// Whether an unattended scroll-to-the-end is running.
+    var autoScrolling: Bool = false { didSet { needsDisplay = true } }
 
     /// Unobserved spans sitting before / after what is currently on screen. Drives the arrows that
     /// point the user back toward content the capture missed.
@@ -338,6 +341,7 @@ final class OverlayView: NSView {
             if scrollAvailable { parts.append("WASD/arrows or trackpad to scroll") }
             parts.append("I: image \(keepImage ? "ON" : "off")")
             parts.append("O: \(ocrMode ? "reading pixels" : "read pixels")")
+            parts.append(autoScrolling ? "G: stop auto-scroll" : "G: auto-scroll to end")
             if rowCount > 0 { parts.append("Return: copy \(rowCount) rows") }
         }
         parts.append("Esc: cancel")
@@ -429,6 +433,7 @@ final class OverlayView: NSView {
         case 49:      delegate?.overlayDidToggleWindowPicking()   // Space
         case 34:      delegate?.overlayDidToggleKeepImage()       // I
         case 31:      delegate?.overlayDidToggleOCR()             // O
+        case 5:       delegate?.overlayDidToggleAutoScroll()      // G
         default:      super.keyDown(with: event)
         }
     }

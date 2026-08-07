@@ -258,7 +258,13 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
         var filter = ScrollingContentFilter()
         let region = target.bounds
 
-        for step in 0...max(0, scrollSteps) {
+        // `--auto` runs the real stopping rule against live content instead of a fixed count,
+        // which is the only way to find out whether "reached the end" actually fires.
+        let auto = CommandLine.arguments.contains("--auto")
+        var pacer = AutoScrollPacer()
+        var step = 0
+
+        while true {
             if step > 0 {
                 Scroller.scrollViaHID(
                     .down, step: scrollStep,
@@ -266,14 +272,26 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
                 )
                 try? await Task.sleep(nanoseconds: 400_000_000)
             }
+            let before = transcript.rows.count
             let capture = await OCRHarvester.capture(
                 target: target, region: region, keepImage: false
             )
             for release in filter.accept(capture.rows) {
                 transcript.ingest(release, commandedDisplacement: Double(scrollStep))
             }
-            if scrollSteps > 0 {
-                print("  step \(step): OCR \(capture.rows.count) rows → transcript \(transcript.rows.count)")
+            let added = transcript.rows.count - before
+            if auto || scrollSteps > 0 {
+                print("  step \(step): OCR \(capture.rows.count) rows, +\(added) → total \(transcript.rows.count)")
+            }
+            step += 1
+
+            if auto {
+                if step > 1, case .stop(let reason) = pacer.next(rowsAdded: added) {
+                    print("  auto-scroll stopped: \(reason) after \(pacer.steps) steps")
+                    break
+                }
+            } else if step > max(0, scrollSteps) {
+                break
             }
         }
         let held = filter.flush()

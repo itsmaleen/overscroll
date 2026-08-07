@@ -94,6 +94,10 @@ final class CaptureController: NSObject, OverlayDelegate {
         trackpadHorizontal = 0
         harvestQueued = false
         harvestModeDecided = false
+        autoScrolling = false
+        pacer.reset()
+        rowsBeforeAutoStep = 0
+        view?.autoScrolling = false
         view?.ocrMode = false
 
         let frame = NSScreen.screens.reduce(NSRect.zero) { $0.union($1.frame) }
@@ -207,6 +211,50 @@ final class CaptureController: NSObject, OverlayDelegate {
     func overlayDidToggleKeepImage() {
         keepImage.toggle()
         view?.keepImage = keepImage
+    }
+
+    /// Scroll to the end without being driven.
+    ///
+    /// Each step is issued from the *completion* of the previous harvest, never on a timer, so the
+    /// scroll can never outrun the read — which is the failure a person cannot avoid by hand.
+    func overlayDidToggleAutoScroll() {
+        guard target != nil else { return }
+        autoScrolling.toggle()
+        view?.autoScrolling = autoScrolling
+        DebugLog.log("autoScroll = \(autoScrolling)")
+
+        guard autoScrolling else {
+            Notifier.info("Auto-scroll stopped")
+            return
+        }
+        pacer.reset()
+        Notifier.info("Auto-scrolling to the end…")
+        advanceAutoScroll()
+    }
+
+    private func advanceAutoScroll() {
+        guard autoScrolling, isActive else { return }
+        rowsBeforeAutoStep = transcript.rows.count
+        overlayDidRequestScroll(autoScrollDirection)
+    }
+
+    /// Called once each harvest settles, which is what paces the loop.
+    private func continueAutoScrollIfNeeded() {
+        guard autoScrolling, isActive else { return }
+        let added = transcript.rows.count - rowsBeforeAutoStep
+
+        switch pacer.next(rowsAdded: added) {
+        case .scroll:
+            // A short breath so the target can finish laying out before the next step is issued.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                Task { @MainActor in self?.advanceAutoScroll() }
+            }
+        case .stop(let reason):
+            autoScrolling = false
+            view?.autoScrolling = false
+            DebugLog.log("autoScroll stopped: \(reason) after \(pacer.steps) steps")
+            Notifier.info("Auto-scroll \(reason) — \(transcript.rows.count) rows")
+        }
     }
 
     func overlayDidToggleOCR() {
@@ -346,6 +394,16 @@ final class CaptureController: NSObject, OverlayDelegate {
     }
 
     func overlayDidCancel() {
+        // While a scroll-to-the-end is running, Esc means "stop this", not "throw the capture
+        // away". Discarding a long unattended run because the user wanted it to halt early would
+        // lose exactly the work the feature exists to gather; a second Esc still cancels.
+        if autoScrolling {
+            autoScrolling = false
+            view?.autoScrolling = false
+            DebugLog.log("autoScroll cancelled by Esc")
+            Notifier.info("Auto-scroll stopped — \(transcript.rows.count) rows. Esc again to cancel.")
+            return
+        }
         teardown()
     }
 
@@ -519,6 +577,10 @@ final class CaptureController: NSObject, OverlayDelegate {
 
     /// Set by the user pressing `O`, for when they already know the target is canvas-rendered and
     /// would rather not scroll three times to prove it.
+    private var autoScrolling = false
+    private var autoScrollDirection: Scroller.Direction = .down
+    private var pacer = AutoScrollPacer()
+    private var rowsBeforeAutoStep = 0
     private var forceOCR = false
     /// Whether the harvest currently being ingested came from the pixel path.
     private var currentHarvestWasOCR = false
@@ -664,6 +726,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         view?.rowCount = transcript.rows.count
         updateGapIndicators()
         updateStatus(outcome: outcome)
+        continueAutoScrollIfNeeded()
     }
 
     /// Point the arrows at where the missed content actually is, relative to what is on screen now.
