@@ -31,10 +31,21 @@ enum OCRHarvester {
         guard let image = await windowImage(target: target, region: region) else {
             return Capture(rows: [], image: nil)
         }
-        let rows = recognize(
+        let recognised = recognize(
             image: image, regionOrigin: region.origin,
             regionWidth: region.width, regionHeight: region.height
         )
+        // Score on the main actor: NSSpellChecker is not documented as thread-safe, and a few dozen
+        // short lines cost little.
+        let rows = await MainActor.run {
+            recognised.map { row in
+                CapturedRow(
+                    text: row.text, role: row.role, links: row.links,
+                    y: row.y, x: row.x, isSelected: row.isSelected,
+                    confidence: LexicalQuality.score(row.text)
+                )
+            }
+        }
         return Capture(rows: rows, image: keepImage ? image : nil)
     }
 
@@ -106,8 +117,9 @@ enum OCRHarvester {
                 role: "OCRLine",
                 links: urls(in: candidate.string),
                 y: Double(regionOrigin.y + y),
-                x: Double(regionOrigin.x + x),
-                confidence: Double(candidate.confidence)
+                x: Double(regionOrigin.x + x)
+                // Deliberately no `confidence:` here. Vision's own is a constant 1.00 in practice;
+                // the caller replaces it with a lexical score that actually varies.
             )
             return (row, y)
         }
