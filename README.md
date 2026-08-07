@@ -48,7 +48,7 @@ out whole.
 While you are dragging the rectangle your trackpad is busy holding it, so the keyboard is the only
 free hand. Both work, in every state:
 
-- **WASD / arrow keys** — scrolls the content under the region. Works *mid-drag*, before the region
+- **WASD / arrow keys** — scrolls the content under the region, vertically or sideways (`A`/`D` for wide tables). Works *mid-drag*, before the region
   is committed, and after it is locked.
 - **Trackpad** — once the region locks, the overlay becomes mouse-transparent, so normal two-finger
   scrolling passes through to the app underneath while the overlay keeps keyboard focus.
@@ -177,6 +177,25 @@ still land before it exists. Overscroll re-harvests at 0.35s, 0.9s and 1.8s whil
 empty, and stops as soon as rows arrive.
 
 Measured on a Chromium browser: 1 node → 458 nodes, and 6 captured rows → 76, after these two fixes.
+
+## Canvas-rendered apps (Google Sheets, Docs, Figma)
+
+**Google Sheets draws its grid to a `<canvas>`**, not to the DOM — Google moved the Docs editors to
+canvas rendering in 2021. A canvas has no semantic structure to read, so there is no accessibility
+tree for the cells and nothing for Overscroll to harvest.
+
+Sheets does have a screen-reader mode: **Tools → Accessibility settings → Turn on screen reader
+support**. With it enabled the app synthesises accessibility output and captures may work, though
+it is built to announce the *focused* cell rather than expose the whole grid, so expect partial
+results.
+
+**For a spreadsheet specifically, screen capture is the wrong tool.** Selecting a range and copying
+gives you the cells as TSV, losslessly, and File → Download → CSV gives you the sheet. Overscroll
+exists for content with no export path; a spreadsheet has an excellent one.
+
+The same reasoning applies to Figma, Google Docs, remote desktops, and games. Where there is no
+tree, the OCR fallback is the only route — and it currently captures a single screenful without
+scrolling, so it is not yet a real answer for long canvas content.
 
 ## Design notes
 
