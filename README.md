@@ -197,6 +197,30 @@ The same reasoning applies to Figma, Google Docs, remote desktops, and games. Wh
 tree, the OCR fallback is the only route — and it currently captures a single screenful without
 scrolling, so it is not yet a real answer for long canvas content.
 
+### OCR consensus
+
+A line stays on screen across several scroll steps, so it is recognised several times — and the
+readings disagree. Overscroll tallies every distinct reading of each line and renders the modal
+one, which costs nothing because the observations were already being made.
+
+Grouping them needs a tolerance (`TextSimilarity`, a Levenshtein ratio): exact comparison treats
+`5. Markers/overlay circling…` and `• Markers/overlay circling…` as different lines, and so does
+containment, since neither contains the other. The tolerance applies to recognised text only —
+accessibility rows are matched exactly, because a tree reports text verbatim and two similar short
+labels are genuinely different things.
+
+Ties are the common case, since a line is usually seen only two or three times, and they are broken
+on **lexical plausibility** rather than length. Two findings forced that:
+
+- **Length is worthless as a tie-break.** OCR substitutes glyphs rather than dropping them, so a
+  garbled reading is usually *exactly* as long as the correct one.
+- **`VNRecognizedText.confidence` is a constant.** Measured across a full page it returned exactly
+  `1.00` for every line, including `concurrenty, camuna rournier a Albe developea ine Uptopnone`.
+
+What does discriminate is that OCR failures produce non-words. The proportion of dictionary words
+scores that garbled line at **0.47** against **1.00** for its neighbours, and consensus then picks
+`Optical character recognition` over `Ontical character recoanition`.
+
 ## Design notes
 
 **Gaps are marked, never hidden.** A gap means no row was shared between two samples, so the
