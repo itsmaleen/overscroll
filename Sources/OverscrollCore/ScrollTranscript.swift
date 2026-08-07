@@ -287,7 +287,17 @@ public struct ScrollTranscript: Sendable {
     private mutating func sortAndDedupe() {
         // Reading order in *document* space, which is stable while the view moves. Rows on the same
         // line sort left to right, so a table reads across before it reads down.
+        //
+        // Unless the content is in columns, where "down then across" is the wrong order entirely:
+        // a y-major sort interleaves the two sides line by line. When a gutter is detected the
+        // column becomes the primary key, so the left side is read out fully before the right.
+        let boundary = columnBoundary()
         placed.sort { lhs, rhs in
+            if let boundary {
+                let lhsColumn = lhs.documentX < boundary ? 0 : 1
+                let rhsColumn = rhs.documentX < boundary ? 0 : 1
+                if lhsColumn != rhsColumn { return lhsColumn < rhsColumn }
+            }
             if abs(lhs.documentY - rhs.documentY) > matchTolerance {
                 return lhs.documentY < rhs.documentY
             }
@@ -368,6 +378,17 @@ public struct ScrollTranscript: Sendable {
                 .filter { $0.upperBound - $0.lowerBound > matchTolerance }
             return candidates.max { ($0.upperBound - $0.lowerBound) < ($1.upperBound - $1.lowerBound) }
         }
+    }
+
+    /// The column gutter, if the placed rows form side-by-side columns.
+    ///
+    /// Recomputed per merge rather than latched, because a capture only becomes recognisably
+    /// two-column once enough of both sides has been seen — deciding early, on the first screenful,
+    /// would fix an answer while the evidence for it is still arriving.
+    private func columnBoundary() -> Double? {
+        ColumnLayout.columnBoundary(
+            for: placed.map { ColumnLayout.Row(x: $0.documentX, y: $0.documentY) }
+        )
     }
 
     /// Whether two rows at the same position are the same line seen twice.
