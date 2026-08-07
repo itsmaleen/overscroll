@@ -25,13 +25,16 @@ APP="$DEST/$APP_NAME.app"
 # Screen Recording after every single rebuild. A stable identity keeps the grants.
 #
 # Prefer a Developer ID if the keychain has one, then any Apple Development cert, then ad-hoc.
+# `|| true` on each lookup is required, not defensive: `set -e` aborts on a failed assignment, and
+# grep exits non-zero when it finds nothing — so on any machine without a certificate the script
+# died here, silently and with no output at all.
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')"
+        | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)"
 fi
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"')"
+        | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"' || true)"
 fi
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
