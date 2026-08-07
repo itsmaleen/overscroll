@@ -286,7 +286,8 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
             print("  chose \"\(entry.consensusText.prefix(60))\" from \(entry.readings)")
         }
         for row in transcript.rows.prefix(15) {
-            print("  y=\(Int(row.y)) x=\(Int(row.x))  \(row.text.prefix(90))")
+            let conf = row.confidence.map { String(format: "%.2f", $0) } ?? "—"
+            print("  conf=\(conf)  \(row.text.prefix(80))")
         }
         finished = true
     }
