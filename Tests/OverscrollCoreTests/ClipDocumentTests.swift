@@ -138,3 +138,58 @@ struct ClipDocumentTests {
         #expect(out.contains("url: \"https://example.com/article\""))
     }
 }
+
+@Suite("ClipDocument OCR noise")
+struct ClipDocumentOCRNoiseTests {
+
+    private func context() -> ClipContext {
+        ClipContext(appName: "Helium", capturedAt: Date(timeIntervalSince1970: 1_770_000_000))
+    }
+
+    private func render(_ texts: [String]) -> [String] {
+        let rows = texts.map { CapturedRow(text: $0, role: "OCRLine") }
+        return ClipDocument(context: context(), rows: rows, mode: .ocr)
+            .render()
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.hasPrefix("---") && !$0.contains(":") || $0.hasPrefix("- ") == false }
+    }
+
+    // Recognised text is not stable frame to frame: the same line returns with its list number in
+    // one pass and without it in the next, so both survive positional de-duplication.
+    @Test("an adjacent repeat missing its list prefix is collapsed, keeping the fuller one")
+    func collapsesPrefixVariant() {
+        let out = render([
+            "5. Markers/overlay circling or identifying what it is referencing",
+            "Markers/overlay circling or identifying what it is referencing",
+            "6. Responses can be very long winded sometimes",
+        ])
+        #expect(out.contains("5. Markers/overlay circling or identifying what it is referencing"))
+        #expect(!out.contains("Markers/overlay circling or identifying what it is referencing"))
+        #expect(out.contains("6. Responses can be very long winded sometimes"))
+    }
+
+    @Test("an exact adjacent repeat is collapsed")
+    func collapsesExactRepeat() {
+        let out = render([
+            "- Not the end of the world but we can play with it a bit",
+            "- Not the end of the world but we can play with it a bit",
+        ])
+        #expect(out.filter { $0.contains("end of the world") }.count == 1)
+    }
+
+    // The same line legitimately appearing twice, far apart, must survive.
+    @Test("a repeat that is not adjacent is kept")
+    func keepsNonAdjacentRepeat() {
+        let out = render(["Overview of the thing", "something else entirely here", "Overview of the thing"])
+        #expect(out.filter { $0.contains("Overview of the thing") }.count == 2)
+    }
+
+    // Short strings contain one another by coincidence constantly.
+    @Test("short adjacent rows are not collapsed on coincidental containment")
+    func keepsShortRows() {
+        let out = render(["Yes", "Yes and no", "No"])
+        #expect(out.contains("Yes"))
+        #expect(out.contains("Yes and no"))
+    }
+}

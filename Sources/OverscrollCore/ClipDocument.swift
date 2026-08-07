@@ -52,7 +52,7 @@ public struct ClipDocument: Sendable {
         var out = frontMatter()
         out += "\n"
 
-        for (index, row) in rows.enumerated() {
+        for (index, row) in collapseNearDuplicates(rows).enumerated() {
             out += line(for: row)
             out += "\n"
             if gapIndices.contains(index) {
@@ -69,6 +69,37 @@ public struct ClipDocument: Sendable {
         }
 
         return out
+    }
+
+    /// Collapse adjacent rows that are the same line read twice.
+    ///
+    /// Positional de-duplication cannot catch this. Recognised text is not stable frame to frame —
+    /// the same line comes back with its bullet or list number in one pass and without it in the
+    /// next — so the two have different identities *and* land a few points apart, and both survive.
+    /// Observed on a Google Doc: "5. Markers/overlay circling…" immediately followed by
+    /// "Markers/overlay circling…".
+    ///
+    /// Only adjacent rows are compared, and only when one contains the other, so distinct lines
+    /// that merely repeat elsewhere in the document are untouched. The longer wins, since it is the
+    /// one that kept its prefix.
+    private func collapseNearDuplicates(_ rows: [CapturedRow]) -> [CapturedRow] {
+        var result: [CapturedRow] = []
+        for row in rows {
+            guard let previous = result.last else {
+                result.append(row)
+                continue
+            }
+            let a = previous.identity
+            let b = row.identity
+            // Guard on length: short strings contain each other by coincidence far too easily.
+            let overlapping = min(a.count, b.count) >= 8 && (a.contains(b) || b.contains(a))
+            guard overlapping else {
+                result.append(row)
+                continue
+            }
+            if b.count > a.count { result[result.count - 1] = row }
+        }
+        return result
     }
 
     private func line(for row: CapturedRow) -> String {

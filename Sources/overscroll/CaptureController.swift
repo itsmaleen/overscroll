@@ -83,6 +83,17 @@ final class CaptureController: NSObject, OverlayDelegate {
         usedAX = false
         scrollsSinceChange = 0
         useHIDScroll = false
+        // Every one of these is per-capture. Leaving them set carried the previous capture's OCR
+        // mode into the next one, so the first `O` press *disabled* the pixel path instead of
+        // enabling it — and a stale scroll counter made OCR fire before anything had been tried.
+        forceOCR = false
+        scrollsWithoutGrowth = 0
+        rowCountAtLastScroll = 0
+        lastScrollDirection = nil
+        trackpadDisplacement = 0
+        trackpadHorizontal = 0
+        harvestQueued = false
+        view?.ocrMode = false
 
         let frame = NSScreen.screens.reduce(NSRect.zero) { $0.union($1.frame) }
         let window = OverlayWindow(frame: frame)
@@ -286,13 +297,28 @@ final class CaptureController: NSObject, OverlayDelegate {
             teardown()
             return
         }
-        // One last harvest so content revealed by the final scroll isn't dropped. Synchronous on
-        // purpose: the async path would return after this method has already read the rows and
-        // emitted. Blocking is acceptable here because the capture is over and every request is
-        // bounded by the accessibility messaging timeout.
+        // One last harvest so content revealed by the final scroll isn't dropped — but it has to
+        // use whichever path the capture has been using. Hardcoding the accessibility read here
+        // meant a canvas capture ended by clobbering its own work: on Google Docs the final AX
+        // harvest returned a single row (the tab title) which replaced a held 14-row OCR snapshot,
+        // and produced a one-line clip.
+        if forceOCR || usedOCR {
+            Task { @MainActor in
+                let capture = await OCRHarvester.capture(
+                    target: target, region: self.regionCG, keepImage: false
+                )
+                self.ingest(capture.rows)
+                self.completeFinish(target: target)
+            }
+            return
+        }
         if let windowElement, regionCG.width > 1, regionCG.height > 1 {
             ingest(AXHarvester.harvest(window: windowElement, region: regionCG))
         }
+        completeFinish(target: target)
+    }
+
+    private func completeFinish(target: WindowTarget) {
         // A capture where the user never scrolled leaves the first snapshot held for comparison
         // that never came. Releasing it unfiltered is the honest result — with no movement there
         // is no evidence about what was chrome.
@@ -458,6 +484,7 @@ final class CaptureController: NSObject, OverlayDelegate {
                     return
                 }
                 self.harvestInFlight = false
+                self.currentHarvestWasOCR = false
                 self.ingest(snapshot)
                 if self.harvestQueued {
                     self.harvestQueued = false
@@ -485,6 +512,8 @@ final class CaptureController: NSObject, OverlayDelegate {
     /// Set by the user pressing `O`, for when they already know the target is canvas-rendered and
     /// would rather not scroll three times to prove it.
     private var forceOCR = false
+    /// Whether the harvest currently being ingested came from the pixel path.
+    private var currentHarvestWasOCR = false
     /// Scrolls issued since the transcript last gained a row.
     private var scrollsWithoutGrowth = 0
     private var rowCountAtLastScroll = 0
@@ -499,6 +528,7 @@ final class CaptureController: NSObject, OverlayDelegate {
             let capture = await OCRHarvester.capture(target: target, region: region, keepImage: false)
             self.harvestInFlight = false
             if !capture.rows.isEmpty { self.usedOCR = true }
+            self.currentHarvestWasOCR = true
             DebugLog.log("OCR harvest → \(capture.rows.count) rows")
             self.ingest(capture.rows)
             if self.harvestQueued {
@@ -515,7 +545,10 @@ final class CaptureController: NSObject, OverlayDelegate {
             DebugLog.log("harvest → 0 rows (empty #\(emptyAXHarvests))")
             return
         }
-        if !usedOCR { usedAX = true }
+        // Credited independently of the OCR flag: gating this on `!usedOCR` under-reported a mixed
+        // capture as pure OCR, which is exactly the case where the reader most needs to know some
+        // rows came from a tree and some from pixels.
+        if !currentHarvestWasOCR { usedAX = true }
         var outcome = ScrollTranscript.Outcome.unchanged
         let releases = contentFilter.accept(snapshot)
         for release in releases {

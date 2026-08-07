@@ -84,9 +84,12 @@ public struct ScrollingContentFilter: Sendable {
         }
 
         guard moved else {
-            // No movement yet, so nothing can be classified. Keep holding, preferring the newer
-            // snapshot since it is at least as complete as the one before it.
-            pending = snapshot
+            // No movement yet, so nothing can be classified. Keep holding — but keep the *fuller*
+            // snapshot, not simply the newest. A later read is not automatically better: a frame
+            // caught mid-scroll, or an accessibility read on a canvas app that only sees chrome,
+            // can be a fraction of the size. Preferring the newest let a 1-row read displace a
+            // 14-row one and reduced a whole capture to a single line.
+            if snapshot.count >= held.count { pending = snapshot }
             return []
         }
 
