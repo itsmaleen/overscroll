@@ -94,6 +94,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         trackpadHorizontal = 0
         harvestQueued = false
         harvestModeDecided = false
+        appliedProfile = nil
         autoScrolling = false
         pacer.reset()
         rowsBeforeAutoStep = 0
@@ -415,6 +416,7 @@ final class CaptureController: NSObject, OverlayDelegate {
             target = found
             windowElement = AXHarvester.windowElement(for: found)
         }
+        applyProfileIfAny()
         // Scrolling only becomes meaningful once there is a window to scroll *and* an element tree
         // to read back from it; without the tree a scroll moves content we cannot capture.
         view?.scrollAvailable = (windowElement != nil)
@@ -590,6 +592,32 @@ final class CaptureController: NSObject, OverlayDelegate {
 
     private var harvestModeDecided = false
     private var lockedAt = Date()
+    private var appliedProfile: AppProfile?
+
+    /// Start the capture in the state this app is already known to need.
+    ///
+    /// Only ever a head start. Every setting here is one detection would have reached anyway, a
+    /// keypress or a probe later — so a profile that misfires costs the round-trip it was meant to
+    /// save and nothing more.
+    private func applyProfileIfAny() {
+        guard let target else { return }
+        let profile = AppProfiles.profile(appName: target.appName, windowTitle: target.title)
+        guard let profile, profile != appliedProfile else { return }
+        appliedProfile = profile
+
+        if profile.scrollRoute == .hidOnly, !useHIDScroll {
+            useHIDScroll = true
+            DebugLog.log("profile \(profile.name): starting on HID scroll — \(profile.rationale)")
+        }
+        if profile.prefersOCR, !forceOCR, Permissions.hasScreenRecording {
+            forceOCR = true
+            harvestModeDecided = true
+            view?.ocrMode = true
+            usedOCR = true
+            DebugLog.log("profile \(profile.name): starting on OCR — \(profile.rationale)")
+            Notifier.info("\(profile.name) draws its content — reading pixels")
+        }
+    }
 
     /// A Chromium tree is still being built for the first moment after it is asked for, so an
     /// immediate read says nothing about whether the app *has* one. Wait for the warmup window
