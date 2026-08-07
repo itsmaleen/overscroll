@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import OverscrollAX
+import OverscrollCore
 
 /// Menu-bar presence and the global hotkey.
 @MainActor
@@ -240,16 +241,51 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
         exit(1)
     }
 
+    // Optional `--scroll N` drives the whole pixel pipeline — harvest, filter, geometry merge and
+    // cross-frame consensus — against live content, which is the only way to exercise the parts
+    // that only misbehave when readings disagree between passes.
+    let scrollSteps = CommandLine.arguments.firstIndex(of: "--scroll")
+        .flatMap { $0 + 1 < CommandLine.arguments.count ? Int(CommandLine.arguments[$0 + 1]) : nil } ?? 0
+    let scrollStep = CommandLine.arguments.firstIndex(of: "--step")
+        .flatMap { $0 + 1 < CommandLine.arguments.count ? Int32(CommandLine.arguments[$0 + 1]) : nil } ?? 250
+
     print("Target: \(target.appName) — \(target.title ?? "")")
     // Spin the runloop rather than blocking on a semaphore: ScreenCaptureKit delivers on the main
     // queue, so waiting on the main thread would deadlock against the very work being awaited.
     var finished = false
     Task {
-        let capture = await OCRHarvester.capture(
-            target: target, region: target.bounds, keepImage: false
-        )
-        print("OCR recovered \(capture.rows.count) rows")
-        for row in capture.rows.prefix(15) {
+        var transcript = ScrollTranscript()
+        var filter = ScrollingContentFilter()
+        let region = target.bounds
+
+        for step in 0...max(0, scrollSteps) {
+            if step > 0 {
+                Scroller.scrollViaHID(
+                    .down, step: scrollStep,
+                    at: CGPoint(x: region.midX, y: region.midY)
+                )
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+            let capture = await OCRHarvester.capture(
+                target: target, region: region, keepImage: false
+            )
+            for release in filter.accept(capture.rows) {
+                transcript.ingest(release, commandedDisplacement: Double(scrollStep))
+            }
+            if scrollSteps > 0 {
+                print("  step \(step): OCR \(capture.rows.count) rows → transcript \(transcript.rows.count)")
+            }
+        }
+        let held = filter.flush()
+        if !held.isEmpty { transcript.ingest(held) }
+
+        let multiRead = transcript.placedRows.filter { $0.readings.count > 1 }
+        print("\nTranscript: \(transcript.rows.count) rows, \(transcript.gapCount) gaps")
+        print("Lines with disagreeing readings (consensus applied): \(multiRead.count)")
+        for entry in multiRead.prefix(5) {
+            print("  chose \"\(entry.consensusText.prefix(60))\" from \(entry.readings)")
+        }
+        for row in transcript.rows.prefix(15) {
             print("  y=\(Int(row.y)) x=\(Int(row.x))  \(row.text.prefix(90))")
         }
         finished = true
