@@ -308,3 +308,68 @@ struct ScrollTranscriptHorizontalTests {
         #expect(transcript.gapCount == 0)
     }
 }
+
+@Suite("ScrollTranscript OCR consensus")
+struct ScrollTranscriptConsensusTests {
+
+    private func ocr(_ items: [(String, Double)]) -> [CapturedRow] {
+        items.map { CapturedRow(text: $0.0, role: "OCRLine", y: $0.1) }
+    }
+
+    private func ax(_ items: [(String, Double)]) -> [CapturedRow] {
+        items.map { CapturedRow(text: $0.0, role: "AXStaticText", y: $0.1) }
+    }
+
+    // A line seen three times, misread once: the majority should decide, not arrival order.
+    @Test("the most frequently observed reading wins")
+    func majorityWins() {
+        var transcript = ScrollTranscript()
+        let good = "5. Markers/overlay circling or identifying what it is referencing"
+        let bad = "• Markers/overlay circling or identifying what it is referencing"
+
+        transcript.ingest(ocr([("anchor line for displacement", 0), (bad, 40)]))
+        transcript.ingest(ocr([("anchor line for displacement", 0), (good, 40)]))
+        transcript.ingest(ocr([("anchor line for displacement", 0), (good, 40)]))
+
+        #expect(transcript.rows.map(\.text).contains(good))
+        #expect(!transcript.rows.map(\.text).contains(bad))
+    }
+
+    // Without consensus these are two rows a few points apart, both surviving.
+    @Test("readings of one line collapse to a single row")
+    func collapsesToOneRow() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(ocr([("The quick brown fox jumps over", 0)]))
+        transcript.ingest(ocr([("The quick br0wn fox jumps over", 2)]))
+        #expect(transcript.rows.count == 1)
+    }
+
+    @Test("a tie is broken toward the longer reading")
+    func tieBreaksLonger() {
+        var transcript = ScrollTranscript()
+        let full = "- Putting something to show user what Ironhand is referencing"
+        let clipped = "Putting something to show user what Ironhand is referencing"
+        transcript.ingest(ocr([(clipped, 0)]))
+        transcript.ingest(ocr([(full, 1)]))
+        #expect(transcript.rows.map(\.text) == [full])
+    }
+
+    // Accessibility text is verbatim, so two similar short labels are genuinely different things
+    // and merging them would corrupt the transcript.
+    @Test("accessibility rows are matched exactly, never approximately")
+    func accessibilityRowsAreExact() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(ax([("Reply to Sarah", 0), ("Reply to Sarih", 20)]))
+        #expect(transcript.rows.count == 2)
+    }
+
+    @Test("genuinely different OCR lines are not merged")
+    func differentLinesSurvive() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(ocr([
+            ("1. Bigger button for quick chat showing core feature", 0),
+            ("2. Zooming in on just the camera", 40),
+        ]))
+        #expect(transcript.rows.count == 2)
+    }
+}

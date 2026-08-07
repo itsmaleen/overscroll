@@ -31,6 +31,25 @@ public struct ScrollTranscript: Sendable {
         public let documentY: Double
         /// Horizontal document position, for content scrolled sideways.
         public let documentX: Double
+
+        /// Every distinct reading of this line, with how often each was seen.
+        ///
+        /// A line stays on screen across several scroll steps, so it is recognised several times.
+        /// Those readings disagree — OCR substitutes a glyph here, drops a list marker there — and
+        /// keeping only the first or the longest is a coin flip. Tallying them lets the majority
+        /// decide, which is the one signal available that costs nothing extra: the observations are
+        /// already being made.
+        public internal(set) var readings: [String: Int]
+
+        /// The reading to use: most frequently observed, and among equals the longest, since a
+        /// truncated recognition is the common failure and a hallucinated-longer one is rare.
+        public var consensusText: String {
+            guard readings.count > 1 else { return row.text }
+            let best = readings.max { lhs, rhs in
+                lhs.value != rhs.value ? lhs.value < rhs.value : lhs.key.count < rhs.key.count
+            }
+            return best?.key ?? row.text
+        }
     }
 
     /// Cumulative screen→document offset. Grows as the view scrolls away from where it started.
@@ -46,7 +65,21 @@ public struct ScrollTranscript: Sendable {
         self.matchTolerance = matchTolerance
     }
 
-    public var rows: [CapturedRow] { placed.map(\.row) }
+    /// Rows carrying the consensus reading of each line rather than whichever arrived first.
+    public var rows: [CapturedRow] {
+        placed.map { entry in
+            let text = entry.consensusText
+            guard text != entry.row.text else { return entry.row }
+            return CapturedRow(
+                text: text,
+                role: entry.row.role,
+                links: entry.row.links,
+                y: entry.row.y,
+                x: entry.row.x,
+                isSelected: entry.row.isSelected
+            )
+        }
+    }
     public var placedRows: [PlacedRow] { placed }
     public var isEmpty: Bool { placed.isEmpty }
     public var gapCount: Int { gapSpans.count }
@@ -77,7 +110,7 @@ public struct ScrollTranscript: Sendable {
 
         guard !placed.isEmpty else {
             for row in incoming {
-                placed.append(PlacedRow(row: row, documentY: row.y, documentX: row.x))
+                placed.append(PlacedRow(row: row, documentY: row.y, documentX: row.x, readings: [row.text: 1]))
             }
             sortAndDedupe()
             return .seeded(rows: placed.count)
@@ -107,7 +140,7 @@ public struct ScrollTranscript: Sendable {
         let before = placed.count
         let incomingPositions = incoming.map { $0.y + offset }
         for (row, documentY) in zip(incoming, incomingPositions) {
-            placed.append(PlacedRow(row: row, documentY: documentY, documentX: row.x + offsetX))
+            placed.append(PlacedRow(row: row, documentY: documentY, documentX: row.x + offsetX, readings: [row.text: 1]))
         }
         sortAndDedupe()
         let added = placed.count - before
@@ -248,14 +281,25 @@ public struct ScrollTranscript: Sendable {
         var deduped: [PlacedRow] = []
         for candidate in placed {
             if let last = deduped.last,
-               last.row.identity == candidate.row.identity,
                abs(last.documentY - candidate.documentY) <= matchTolerance,
-               abs(last.documentX - candidate.documentX) <= matchTolerance {
+               abs(last.documentX - candidate.documentX) <= matchTolerance,
+               isSameLine(last.row, candidate.row) {
+                // Another reading of a line already placed. Record the vote rather than replacing:
+                // for recognised text the two spellings disagree, and the majority across all the
+                // passes that saw this line is a far better answer than whichever arrived last.
+                var merged = last
+                merged.readings[candidate.row.text, default: 0] += 1
                 // Prefer the observation carrying more link data; some passes realize an element
                 // only partially.
                 if candidate.row.links.count > last.row.links.count {
-                    deduped[deduped.count - 1] = candidate
+                    merged = PlacedRow(
+                        row: candidate.row,
+                        documentY: merged.documentY,
+                        documentX: merged.documentX,
+                        readings: merged.readings
+                    )
                 }
+                deduped[deduped.count - 1] = merged
                 continue
             }
             deduped.append(candidate)
@@ -306,6 +350,19 @@ public struct ScrollTranscript: Sendable {
                 .filter { $0.upperBound - $0.lowerBound > matchTolerance }
             return candidates.max { ($0.upperBound - $0.lowerBound) < ($1.upperBound - $1.lowerBound) }
         }
+    }
+
+    /// Whether two rows at the same position are the same line seen twice.
+    ///
+    /// Exact identity for anything from an accessibility tree, which reports text verbatim — two
+    /// genuinely different short labels can look similar, and merging them would be a corruption.
+    /// Recognised text gets a tolerance, because it is *expected* to differ between passes and
+    /// demanding exactness there means the same line is stored several times over.
+    private func isSameLine(_ lhs: CapturedRow, _ rhs: CapturedRow) -> Bool {
+        guard lhs.role == "OCRLine", rhs.role == "OCRLine" else {
+            return lhs.identity == rhs.identity
+        }
+        return TextSimilarity.areSameLine(lhs.identity, rhs.identity)
     }
 
     /// Indices in `rows` after which a gap span falls, for rendering inline markers.
