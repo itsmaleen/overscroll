@@ -309,7 +309,10 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
         }
         finished = true
     }
-    let deadline = Date().addingTimeInterval(20)
+    // Generous in auto mode: a step costs roughly a second, so a 20s ceiling cut every unattended
+    // run off at ~20 steps and made it look as though the stopping rule never fired.
+    let budget: TimeInterval = CommandLine.arguments.contains("--auto") ? 600 : 20
+    let deadline = Date().addingTimeInterval(budget)
     while !finished, Date() < deadline {
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
