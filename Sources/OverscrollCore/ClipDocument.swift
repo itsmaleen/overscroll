@@ -52,7 +52,7 @@ public struct ClipDocument: Sendable {
         var out = frontMatter()
         out += "\n"
 
-        for (index, row) in collapseNearDuplicates(rows).enumerated() {
+        for (index, row) in rejoinWrappedLines(collapseNearDuplicates(rows)).enumerated() {
             out += line(for: row)
             out += "\n"
             if gapIndices.contains(index) {
@@ -100,6 +100,51 @@ public struct ClipDocument: Sendable {
             if b.count > a.count { result[result.count - 1] = row }
         }
         return result
+    }
+
+    /// Rejoin a sentence that the renderer broke across visual lines.
+    ///
+    /// OCR reports what it sees, and what it sees is *lines*, not paragraphs. A wrapped sentence
+    /// therefore arrives as several rows and its tail is orphaned — a Google Doc capture ended with
+    /// "…should be able to zoom like camera" and then "app" alone on the next line, and a bullet's
+    /// second half detached from the bullet entirely.
+    ///
+    /// The join is deliberately conservative, because wrongly merging two real lines is worse than
+    /// leaving a fragment: it requires the continuation to begin lowercase *and* the previous line
+    /// to end without terminal punctuation. Both hold for a wrap and rarely for anything else. Only
+    /// recognised text is touched; accessibility rows already arrive as whole paragraphs.
+    private func rejoinWrappedLines(_ rows: [CapturedRow]) -> [CapturedRow] {
+        var result: [CapturedRow] = []
+        for row in rows {
+            guard let previous = result.last,
+                  previous.role == "OCRLine", row.role == "OCRLine",
+                  continuesPreviousLine(previous: previous.text, next: row.text)
+            else {
+                result.append(row)
+                continue
+            }
+            result[result.count - 1] = CapturedRow(
+                text: previous.text + " " + row.text.trimmingCharacters(in: .whitespaces),
+                role: previous.role,
+                links: previous.links + row.links,
+                y: previous.y,
+                x: previous.x,
+                isSelected: previous.isSelected
+            )
+        }
+        return result
+    }
+
+    private func continuesPreviousLine(previous: String, next: String) -> Bool {
+        guard let tail = previous.trimmingCharacters(in: .whitespaces).last,
+              let head = next.trimmingCharacters(in: .whitespaces).first
+        else { return false }
+        // A sentence that ended is not continued.
+        guard !".!?:;•".contains(tail) else { return false }
+        // A list marker starts something new, whatever its case.
+        guard !"-•*".contains(head), !head.isNumber else { return false }
+        // Lowercase start is the signal that carries the most weight and the least risk.
+        return head.isLowercase
     }
 
     private func line(for row: CapturedRow) -> String {

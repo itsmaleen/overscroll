@@ -193,3 +193,63 @@ struct ClipDocumentOCRNoiseTests {
         #expect(out.contains("Yes and no"))
     }
 }
+
+@Suite("ClipDocument wrapped lines")
+struct ClipDocumentWrapTests {
+
+    private func body(_ texts: [String], role: String = "OCRLine") -> [String] {
+        let rows = texts.map { CapturedRow(text: $0, role: role) }
+        let out = ClipDocument(
+            context: ClipContext(appName: "Helium", capturedAt: Date(timeIntervalSince1970: 1)),
+            rows: rows, mode: .ocr
+        ).render()
+        // Body only: drop the YAML block.
+        let parts = out.components(separatedBy: "---\n")
+        return (parts.last ?? "").split(separator: "\n").map(String.init)
+    }
+
+    // The exact case from a Google Doc capture: the sentence's tail stranded on its own line.
+    @Test("a lowercase continuation is rejoined to the line above")
+    func rejoinsWrappedTail() {
+        let out = body([
+            "- When trying to zoom in, it zooms the full browser. Should be able to zoom like camera",
+            "app",
+            "3. Being able to record demo with audio",
+        ])
+        #expect(out.contains { $0.hasSuffix("zoom like camera app") })
+        #expect(!out.contains("app"))
+        #expect(out.contains("3. Being able to record demo with audio"))
+    }
+
+    @Test("a line after terminal punctuation is left alone")
+    func respectsSentenceEnd() {
+        let out = body(["That is the end.", "another thought entirely"])
+        #expect(out.contains("That is the end."))
+        #expect(out.contains("another thought entirely"))
+    }
+
+    @Test("a new list item is never absorbed, whatever its case")
+    func neverAbsorbsListItems() {
+        let out = body([
+            "4. Voice seems a bit robotic sometimes",
+            "- not the end of the world but we can play with it",
+        ])
+        #expect(out.contains("4. Voice seems a bit robotic sometimes"))
+        #expect(out.contains { $0.contains("not the end of the world") && $0.hasPrefix("-") })
+    }
+
+    @Test("an uppercase start is treated as a new line, not a continuation")
+    func uppercaseStartsNewLine() {
+        let out = body(["Something without punctuation", "Another separate line"])
+        #expect(out.contains("Something without punctuation"))
+        #expect(out.contains("Another separate line"))
+    }
+
+    // Accessibility rows already arrive as whole paragraphs, so joining them would be wrong.
+    @Test("accessibility rows are never rejoined")
+    func leavesAccessibilityRowsAlone() {
+        let out = body(["a line with no full stop", "continuation looking text"], role: "AXStaticText")
+        #expect(out.contains("a line with no full stop"))
+        #expect(out.contains("continuation looking text"))
+    }
+}
