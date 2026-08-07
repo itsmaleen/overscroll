@@ -30,14 +30,25 @@ public struct CapturedRow: Sendable, Equatable, Codable {
     /// having. `nil` for elements where selection is not a meaningful concept.
     public let isSelected: Bool?
 
+    /// How sure the recogniser was, 0…1. `nil` for accessibility rows, whose text is exact rather
+    /// than inferred.
+    ///
+    /// Frequency alone cannot choose between readings: a line is usually seen only two or three
+    /// times, so the vote is often tied, and length breaks nothing when the garbled reading is the
+    /// same length as the good one — "Ontical character recoanition" against "Optical character
+    /// recognition". Vision already scores every recognition and the number was being discarded.
+    public let confidence: Double?
+
     public init(
         text: String,
         role: String = "AXStaticText",
         links: [String] = [],
         y: Double = 0,
         x: Double = 0,
-        isSelected: Bool? = nil
+        isSelected: Bool? = nil,
+        confidence: Double? = nil
     ) {
+        self.confidence = confidence
         self.text = text
         self.role = role
         self.links = links

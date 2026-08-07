@@ -373,3 +373,55 @@ struct ScrollTranscriptConsensusTests {
         #expect(transcript.rows.count == 2)
     }
 }
+
+@Suite("ScrollTranscript consensus by confidence")
+struct ScrollTranscriptConfidenceTests {
+
+    private func ocr(_ text: String, y: Double, confidence: Double) -> CapturedRow {
+        CapturedRow(text: text, role: "OCRLine", y: y, confidence: confidence)
+    }
+
+    // The failure this exists to fix, taken from a live capture: two readings, seen once each, and
+    // exactly the same length because OCR substitutes glyphs rather than dropping them. Frequency
+    // ties, length ties, and the choice collapsed to dictionary order.
+    @Test("confidence breaks a tie that frequency and length cannot")
+    func confidenceBreaksTie() {
+        let garbled = "Ontical character recoanition (OCR) or ontical character reader"
+        let good = "Optical character recognition (OCR) or optical character reader"
+        #expect(garbled.count == good.count)
+
+        var transcript = ScrollTranscript()
+        transcript.ingest([ocr("a stable anchor line of text", y: 0, confidence: 0.9),
+                           ocr(garbled, y: 40, confidence: 0.31)])
+        transcript.ingest([ocr("a stable anchor line of text", y: 0, confidence: 0.9),
+                           ocr(good, y: 40, confidence: 0.96)])
+
+        #expect(transcript.rows.map(\.text).contains(good))
+        #expect(!transcript.rows.map(\.text).contains(garbled))
+    }
+
+    // Confidence is only the tie-break; a reading seen more often still wins.
+    @Test("frequency still outranks confidence")
+    func frequencyOutranksConfidence() {
+        let often = "the reading seen repeatedly across passes"
+        let once = "the readinq seen repeatedly across passes"
+
+        var transcript = ScrollTranscript()
+        transcript.ingest([ocr("anchor line holding position", y: 0, confidence: 0.9),
+                           ocr(once, y: 40, confidence: 0.99)])
+        transcript.ingest([ocr("anchor line holding position", y: 0, confidence: 0.9),
+                           ocr(often, y: 40, confidence: 0.5)])
+        transcript.ingest([ocr("anchor line holding position", y: 0, confidence: 0.9),
+                           ocr(often, y: 40, confidence: 0.5)])
+
+        #expect(transcript.rows.map(\.text).contains(often))
+    }
+
+    // Accessibility rows have no confidence; they must not be penalised against OCR rows.
+    @Test("a row with no confidence is treated as certain")
+    func missingConfidenceIsCertain() {
+        var transcript = ScrollTranscript()
+        transcript.ingest([CapturedRow(text: "exact tree text here", role: "AXStaticText", y: 0)])
+        #expect(transcript.rows.map(\.text) == ["exact tree text here"])
+    }
+}

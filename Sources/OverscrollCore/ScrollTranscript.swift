@@ -39,14 +39,31 @@ public struct ScrollTranscript: Sendable {
         /// keeping only the first or the longest is a coin flip. Tallying them lets the majority
         /// decide, which is the one signal available that costs nothing extra: the observations are
         /// already being made.
-        public internal(set) var readings: [String: Int]
+        public internal(set) var readings: [String: Reading]
 
-        /// The reading to use: most frequently observed, and among equals the longest, since a
-        /// truncated recognition is the common failure and a hallucinated-longer one is rare.
+        /// One candidate spelling of a line, with the evidence supporting it.
+        public struct Reading: Sendable, Equatable {
+            public var count: Int
+            /// Summed recogniser confidence across the passes that produced this spelling.
+            public var confidenceSum: Double
+            public var meanConfidence: Double { count > 0 ? confidenceSum / Double(count) : 0 }
+        }
+
+        /// The reading to use.
+        ///
+        /// Frequency first, but confidence decides the ties — and ties are the common case, because
+        /// a line is typically seen only two or three times. Length was the original tie-break and
+        /// it is worthless here: a garbled reading is usually *exactly as long* as the correct one,
+        /// since OCR substitutes glyphs rather than dropping them, so the choice collapsed to
+        /// dictionary order and picked "Ontical character recoanition" about half the time.
         public var consensusText: String {
             guard readings.count > 1 else { return row.text }
             let best = readings.max { lhs, rhs in
-                lhs.value != rhs.value ? lhs.value < rhs.value : lhs.key.count < rhs.key.count
+                if lhs.value.count != rhs.value.count { return lhs.value.count < rhs.value.count }
+                if abs(lhs.value.meanConfidence - rhs.value.meanConfidence) > 0.001 {
+                    return lhs.value.meanConfidence < rhs.value.meanConfidence
+                }
+                return lhs.key.count < rhs.key.count
             }
             return best?.key ?? row.text
         }
@@ -110,7 +127,7 @@ public struct ScrollTranscript: Sendable {
 
         guard !placed.isEmpty else {
             for row in incoming {
-                placed.append(PlacedRow(row: row, documentY: row.y, documentX: row.x, readings: [row.text: 1]))
+                placed.append(PlacedRow(row: row, documentY: row.y, documentX: row.x, readings: [row.text: PlacedRow.Reading(count: 1, confidenceSum: row.confidence ?? 1)]))
             }
             sortAndDedupe()
             return .seeded(rows: placed.count)
@@ -140,7 +157,7 @@ public struct ScrollTranscript: Sendable {
         let before = placed.count
         let incomingPositions = incoming.map { $0.y + offset }
         for (row, documentY) in zip(incoming, incomingPositions) {
-            placed.append(PlacedRow(row: row, documentY: documentY, documentX: row.x + offsetX, readings: [row.text: 1]))
+            placed.append(PlacedRow(row: row, documentY: documentY, documentX: row.x + offsetX, readings: [row.text: PlacedRow.Reading(count: 1, confidenceSum: row.confidence ?? 1)]))
         }
         sortAndDedupe()
         let added = placed.count - before
@@ -288,7 +305,8 @@ public struct ScrollTranscript: Sendable {
                 // for recognised text the two spellings disagree, and the majority across all the
                 // passes that saw this line is a far better answer than whichever arrived last.
                 var merged = last
-                merged.readings[candidate.row.text, default: 0] += 1
+                merged.readings[candidate.row.text, default: PlacedRow.Reading(count: 0, confidenceSum: 0)].count += 1
+                merged.readings[candidate.row.text]?.confidenceSum += candidate.row.confidence ?? 1
                 // Prefer the observation carrying more link data; some passes realize an element
                 // only partially.
                 if candidate.row.links.count > last.row.links.count {

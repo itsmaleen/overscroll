@@ -106,7 +106,8 @@ enum OCRHarvester {
                 role: "OCRLine",
                 links: urls(in: candidate.string),
                 y: Double(regionOrigin.y + y),
-                x: Double(regionOrigin.x + x)
+                x: Double(regionOrigin.x + x),
+                confidence: Double(candidate.confidence)
             )
             return (row, y)
         }
