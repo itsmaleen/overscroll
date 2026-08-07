@@ -199,6 +199,30 @@ The same reasoning applies to Figma, Google Docs, remote desktops, and games. Wh
 tree, the OCR fallback is the only route — and it currently captures a single screenful without
 scrolling, so it is not yet a real answer for long canvas content.
 
+### Columns
+
+Reading order is normally down-then-across, and a y-major sort produces it. A two-column layout
+inverts that — the correct order is the whole left column, then the whole right — so a y-major sort
+interleaves the two sides line by line.
+
+When a gutter is detected the column becomes the primary sort key. The hazard is over-detection
+rather than under-detection: an indented list also has rows at two x positions, and splitting *that*
+would scatter every bullet away from its own continuation lines, which is worse than the problem
+being solved. Three conditions must hold together — a gutter far wider than indentation, at least
+five rows on the narrower side, and genuine vertical co-existence — and each rejects a specific
+false positive.
+
+### Per-app profiles
+
+`AppProfiles` records what is already known about an app so it is not rediscovered on every capture:
+WhatsApp starts on the HID tap, Google Docs/Sheets/Slides start on the pixel path. Matching is on
+the window **title** as well as the app, because the app is often the wrong unit — a browser is a
+good accessibility citizen on most pages and blind on a Google Doc.
+
+A profile only ever gives a head start. It sets state that detection would have reached anyway, and
+never disables the detection, so a profile that misfires costs the round-trip it was meant to save
+and nothing worse.
+
 ### Auto-scroll
 
 `G` scrolls to the end on its own. Each step is issued from the **completion of the previous
