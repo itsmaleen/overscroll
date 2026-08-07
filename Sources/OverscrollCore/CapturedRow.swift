@@ -16,6 +16,13 @@ public struct CapturedRow: Sendable, Equatable, Codable {
     /// meaningless across snapshots because the content moves.
     public let y: Double
 
+    /// Horizontal position in screen coordinates at harvest time.
+    ///
+    /// Tracked for the same reason as `y`, and it is not optional detail: a wide table or
+    /// spreadsheet is scrolled sideways, where every row keeps its `y` and only `x` changes. A
+    /// y-only model reads that as "nothing moved".
+    public let x: Double
+
     /// Selection state for controls that have one — radio buttons, checkboxes, toggles.
     ///
     /// Captured because on a form the *answer* is the state, not the label: "Software Engineering"
@@ -28,12 +35,14 @@ public struct CapturedRow: Sendable, Equatable, Codable {
         role: String = "AXStaticText",
         links: [String] = [],
         y: Double = 0,
+        x: Double = 0,
         isSelected: Bool? = nil
     ) {
         self.text = text
         self.role = role
         self.links = links
         self.y = y
+        self.x = x
         self.isSelected = isSelected
     }
 

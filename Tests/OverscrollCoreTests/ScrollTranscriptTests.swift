@@ -251,3 +251,60 @@ struct ScrollTranscriptGapNavigationTests {
         #expect(span.upperBound == 400)
     }
 }
+
+@Suite("ScrollTranscript horizontal scrolling")
+struct ScrollTranscriptHorizontalTests {
+
+    /// Snapshot from (text, y, x) triples.
+    private func grid(_ items: [(String, Double, Double)]) -> [CapturedRow] {
+        items.map { CapturedRow(text: $0.0, y: $0.1, x: $0.2) }
+    }
+
+    // A wide table is scrolled sideways: every row keeps its height and only x changes. A y-only
+    // model reads that as "nothing moved" and captures a single viewport.
+    @Test("sideways scrolling reveals new columns and places them correctly")
+    func horizontalScroll() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(grid([("A1", 0, 0), ("B1", 0, 100), ("A2", 30, 0), ("B2", 30, 100)]))
+        // Scrolled right by 100: column A leaves, column C arrives.
+        let outcome = transcript.ingest(grid([
+            ("B1", 0, 0), ("C1", 0, 100), ("B2", 30, 0), ("C2", 30, 100),
+        ]))
+
+        guard case .merged(let added, _, _) = outcome else {
+            Issue.record("expected merged, got \(outcome)")
+            return
+        }
+        #expect(added == 2)
+        // Reading order: across each row, then down.
+        #expect(transcript.rows.map(\.text) == ["A1", "B1", "C1", "A2", "B2", "C2"])
+    }
+
+    @Test("purely horizontal movement is still a measured merge, not a gap")
+    func horizontalIsNotAGap() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(grid([("keep", 0, 0), ("edge", 0, 200)]))
+        transcript.ingest(grid([("edge", 0, 0), ("new", 0, 200)]))
+        #expect(transcript.gapCount == 0)
+        #expect(transcript.rows.map(\.text) == ["keep", "edge", "new"])
+    }
+
+    // Identical text repeated across columns is the normal case in a table; picking the nearest
+    // anchor by vertical distance alone would match the wrong cell.
+    @Test("repeated cell text across columns does not corrupt the displacement")
+    func repeatedCellsAcrossColumns() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(grid([("Yes", 0, 0), ("No", 0, 100), ("Yes", 0, 200)]))
+        transcript.ingest(grid([("No", 0, -100), ("Yes", 0, 0), ("Maybe", 0, 100)]))
+        #expect(transcript.rows.map(\.text) == ["Yes", "No", "Yes", "Maybe"])
+    }
+
+    @Test("diagonal movement is measured on both axes")
+    func diagonalScroll() {
+        var transcript = ScrollTranscript()
+        transcript.ingest(grid([("a", 0, 0), ("b", 50, 50)]))
+        transcript.ingest(grid([("b", 20, 10), ("c", 70, 60)]))
+        #expect(transcript.rows.map(\.text) == ["a", "b", "c"])
+        #expect(transcript.gapCount == 0)
+    }
+}

@@ -28,7 +28,17 @@ public struct ScrollingContentFilter: Sendable {
     /// occupies two rows at different heights. With one stored position the comparison lands on the
     /// wrong instance, the row looks stationary, and *both* instances are blacklisted as chrome.
     /// Observed on a job application: entire snapshots (29 of 29 rows) discarded that way.
-    private var lastPositions: [String: [Double]] = [:]
+    private var lastPositions: [String: [Position]] = [:]
+
+    /// A row's location on both axes.
+    ///
+    /// Classifying on `y` alone breaks entirely on sideways scrolling: every row keeps its height,
+    /// so nothing registers as moving, no snapshot is ever released, and a wide table or
+    /// spreadsheet captures a single viewport.
+    struct Position: Equatable {
+        let y: Double
+        let x: Double
+    }
     /// The snapshot held back awaiting evidence of movement. Cleared once the first release
     /// happens, after which snapshots stream straight through.
     private var pending: [CapturedRow]?
@@ -95,17 +105,23 @@ public struct ScrollingContentFilter: Sendable {
         return strip(held)
     }
 
-    private func positionsByIdentity(_ snapshot: [CapturedRow]) -> [String: [Double]] {
-        var grouped: [String: [Double]] = [:]
-        for row in snapshot { grouped[row.identity, default: []].append(row.y) }
-        for key in grouped.keys { grouped[key]?.sort() }
+    private func positionsByIdentity(_ snapshot: [CapturedRow]) -> [String: [Position]] {
+        var grouped: [String: [Position]] = [:]
+        for row in snapshot {
+            grouped[row.identity, default: []].append(Position(y: row.y, x: row.x))
+        }
+        for key in grouped.keys {
+            grouped[key]?.sort { $0.y == $1.y ? $0.x < $1.x : $0.y < $1.y }
+        }
         return grouped
     }
 
-    /// Whether two position sets describe the same, unmoved rows.
-    private func positionsMatch(_ lhs: [Double], _ rhs: [Double]) -> Bool {
+    /// Whether two position sets describe the same, unmoved rows — on both axes.
+    private func positionsMatch(_ lhs: [Position], _ rhs: [Position]) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        return zip(lhs, rhs).allSatisfy { abs($0 - $1) <= tolerance }
+        return zip(lhs, rhs).allSatisfy {
+            abs($0.y - $1.y) <= tolerance && abs($0.x - $1.x) <= tolerance
+        }
     }
 
     /// Filter an already-released snapshot with the current knowledge of what is static.

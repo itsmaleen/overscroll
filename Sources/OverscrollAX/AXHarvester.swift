@@ -350,6 +350,7 @@ public enum AXHarvester {
                 text: text, role: role,
                 links: links(of: element, text: text),
                 y: Double(elementFrame.minY),
+                x: Double(elementFrame.minX),
                 isSelected: selectableRoles.contains(role) ? selectionState(of: element) : nil
             ),
             y: Double(elementFrame.minY),

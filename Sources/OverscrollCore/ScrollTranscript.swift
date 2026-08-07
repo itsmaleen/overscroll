@@ -29,10 +29,15 @@ public struct ScrollTranscript: Sendable {
         public let row: CapturedRow
         /// Position in document space: stable across scrolling, unlike the row's screen y.
         public let documentY: Double
+        /// Horizontal document position, for content scrolled sideways.
+        public let documentX: Double
     }
 
     /// Cumulative screen→document offset. Grows as the view scrolls away from where it started.
     private var offset: Double = 0
+    /// Horizontal counterpart. Kept separate rather than folded into a point because the vertical
+    /// axis carries reading order and the horizontal one does not.
+    private var offsetX: Double = 0
     private var placed: [PlacedRow] = []
     /// Document-space spans where content was skipped without being sampled.
     public private(set) var gapSpans: [ClosedRange<Double>] = []
@@ -49,6 +54,7 @@ public struct ScrollTranscript: Sendable {
     public enum Outcome: Sendable, Equatable {
         case seeded(rows: Int)
         /// Displacement measured from `anchors` rows shared with what we already had.
+        /// `displacement` is the vertical component; horizontal is reported by `horizontal`.
         case merged(added: Int, displacement: Double, anchors: Int)
         /// Nothing was shared, so displacement had to be assumed from the commanded scroll.
         case estimated(added: Int, assumed: Double)
@@ -62,14 +68,16 @@ public struct ScrollTranscript: Sendable {
     /// positive means content moved down the screen.
     @discardableResult
     public mutating func ingest(
-        _ snapshot: [CapturedRow], commandedDisplacement: Double = 0
+        _ snapshot: [CapturedRow],
+        commandedDisplacement: Double = 0,
+        commandedHorizontal: Double = 0
     ) -> Outcome {
         let incoming = snapshot.filter { !$0.isEmpty }
         guard !incoming.isEmpty else { return .unchanged }
 
         guard !placed.isEmpty else {
             for row in incoming {
-                placed.append(PlacedRow(row: row, documentY: row.y))
+                placed.append(PlacedRow(row: row, documentY: row.y, documentX: row.x))
             }
             sortAndDedupe()
             return .seeded(rows: placed.count)
@@ -78,24 +86,28 @@ public struct ScrollTranscript: Sendable {
         let anchors = measureDisplacement(incoming)
 
         let displacement: Double
+        let horizontal: Double
         let measured: Bool
         if let anchors, !anchors.deltas.isEmpty {
             // Median, not mean: a row that reflowed or resized would otherwise drag the estimate,
             // and a single bad anchor would corrupt every subsequent position.
             displacement = median(anchors.deltas)
+            horizontal = median(anchors.horizontalDeltas)
             measured = true
         } else {
             displacement = commandedDisplacement
+            horizontal = commandedHorizontal
             measured = false
         }
 
         let existingExtent = extent(of: placed.map(\.documentY))
         offset += displacement
+        offsetX += horizontal
 
         let before = placed.count
         let incomingPositions = incoming.map { $0.y + offset }
         for (row, documentY) in zip(incoming, incomingPositions) {
-            placed.append(PlacedRow(row: row, documentY: documentY))
+            placed.append(PlacedRow(row: row, documentY: documentY, documentX: row.x + offsetX))
         }
         sortAndDedupe()
         let added = placed.count - before
@@ -124,6 +136,7 @@ public struct ScrollTranscript: Sendable {
 
     private struct Anchors {
         var deltas: [Double]
+        var horizontalDeltas: [Double]
         var count: Int
     }
 
@@ -132,22 +145,60 @@ public struct ScrollTranscript: Sendable {
     /// A row's document position is fixed, so `documentY - (screenY + offset)` is the displacement
     /// this snapshot represents. With repeated text there may be several candidates; the one
     /// implying the smallest movement is taken, since content rarely jumps further than it has to.
+    /// Recover the displacement by consensus among every possible anchor pairing.
+    ///
+    /// Matching each row to its *nearest* previous instance and averaging is circular: choosing the
+    /// nearest candidate presumes the offset that is being solved for. With repeated text — cells
+    /// reading "Yes", a column of identical labels — it picks wrong, and the average of a right and
+    /// a wrong answer is a third answer that is wrong too. Measured on a three-cell case: a true
+    /// displacement of 200 came out as 100.
+    ///
+    /// Instead every (row, candidate) pairing proposes a displacement and votes. The true one is
+    /// proposed by *every* correctly-matched row, while spurious pairings scatter, so the
+    /// best-supported bucket wins outright. Cheap, and it degrades gracefully: with a single
+    /// unambiguous anchor it reduces to that anchor's answer.
     private func measureDisplacement(_ incoming: [CapturedRow]) -> Anchors? {
-        var index: [String: [Double]] = [:]
+        var index: [String: [(y: Double, x: Double)]] = [:]
         for row in placed {
-            index[row.row.identity, default: []].append(row.documentY)
+            index[row.row.identity, default: []].append((row.documentY, row.documentX))
         }
 
-        var deltas: [Double] = []
+        // Bucket key rounds to the match tolerance so near-identical proposals reinforce each other.
+        struct Bucket: Hashable { let y: Int; let x: Int }
+        var support: [Bucket: (ys: [Double], xs: [Double])] = [:]
+
         for row in incoming {
-            guard let candidates = index[row.identity], !candidates.isEmpty else { continue }
-            let projected = row.y + offset
-            let best = candidates.min { abs($0 - projected) < abs($1 - projected) }
-            guard let best else { continue }
-            deltas.append(best - projected)
+            guard let candidates = index[row.identity] else { continue }
+            let projectedY = row.y + offset
+            let projectedX = row.x + offsetX
+            for candidate in candidates {
+                let dy = candidate.y - projectedY
+                let dx = candidate.x - projectedX
+                let key = Bucket(
+                    y: Int((dy / matchTolerance).rounded()),
+                    x: Int((dx / matchTolerance).rounded())
+                )
+                support[key, default: ([], [])].ys.append(dy)
+                support[key, default: ([], [])].xs.append(dx)
+            }
         }
-        guard !deltas.isEmpty else { return nil }
-        return Anchors(deltas: deltas, count: deltas.count)
+
+        // Most support wins; ties break toward the smaller movement, since content rarely jumps
+        // further than it has to.
+        let winner = support.max { lhs, rhs in
+            if lhs.value.ys.count != rhs.value.ys.count {
+                return lhs.value.ys.count < rhs.value.ys.count
+            }
+            return hypot(Double(lhs.key.y), Double(lhs.key.x))
+                > hypot(Double(rhs.key.y), Double(rhs.key.x))
+        }
+        guard let winner, !winner.value.ys.isEmpty else { return nil }
+
+        return Anchors(
+            deltas: winner.value.ys,
+            horizontalDeltas: winner.value.xs,
+            count: winner.value.ys.count
+        )
     }
 
     private func extent(of positions: [Double]) -> ClosedRange<Double>? {
@@ -184,8 +235,13 @@ public struct ScrollTranscript: Sendable {
     /// messages. Position alone is not the key either, since rows shift slightly. Both together
     /// are, which is exactly the ambiguity run matching existed to work around.
     private mutating func sortAndDedupe() {
+        // Reading order in *document* space, which is stable while the view moves. Rows on the same
+        // line sort left to right, so a table reads across before it reads down.
         placed.sort { lhs, rhs in
-            if abs(lhs.documentY - rhs.documentY) > 0.001 { return lhs.documentY < rhs.documentY }
+            if abs(lhs.documentY - rhs.documentY) > matchTolerance {
+                return lhs.documentY < rhs.documentY
+            }
+            if abs(lhs.documentX - rhs.documentX) > 0.001 { return lhs.documentX < rhs.documentX }
             return lhs.row.text < rhs.row.text
         }
 
@@ -193,7 +249,8 @@ public struct ScrollTranscript: Sendable {
         for candidate in placed {
             if let last = deduped.last,
                last.row.identity == candidate.row.identity,
-               abs(last.documentY - candidate.documentY) <= matchTolerance {
+               abs(last.documentY - candidate.documentY) <= matchTolerance,
+               abs(last.documentX - candidate.documentX) <= matchTolerance {
                 // Prefer the observation carrying more link data; some passes realize an element
                 // only partially.
                 if candidate.row.links.count > last.row.links.count {

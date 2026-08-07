@@ -274,7 +274,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         // that never came. Releasing it unfiltered is the honest result — with no movement there
         // is no evidence about what was chrome.
         let held = contentFilter.flush()
-        if !held.isEmpty { transcript.ingest(held, commandedDisplacement: commandedDisplacement) }
+        if !held.isEmpty { transcript.ingest(held, commandedDisplacement: commandedDisplacement, commandedHorizontal: commandedHorizontal) }
         DebugLog.log("FINISH rows=\(transcript.rows.count) gaps=\(transcript.gapCount) "
             + "flushed=\(held.count) route=\(useHIDScroll ? "HID" : "pid")")
 
@@ -342,9 +342,13 @@ final class CaptureController: NSObject, OverlayDelegate {
                     // sign, so it needs no inversion: a positive deltaY means content moved down.
                     self.lastScrollDirection = nil
                     self.trackpadDisplacement = deltaY
+                    self.trackpadHorizontal = 0
                 } else if deltaX != 0 {
                     self.lastHint = .unknown
                     self.pendingEdge = deltaX > 0 ? .left : .right
+                    self.lastScrollDirection = nil
+                    self.trackpadDisplacement = 0
+                    self.trackpadHorizontal = deltaX
                 }
                 DebugLog.log("trackpad scroll dy=\(Int(deltaY)) dx=\(Int(deltaX))")
                 self.lastActivity = Date()
@@ -431,7 +435,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         var outcome = ScrollTranscript.Outcome.unchanged
         let releases = contentFilter.accept(snapshot)
         for release in releases {
-            outcome = transcript.ingest(release, commandedDisplacement: commandedDisplacement)
+            outcome = transcript.ingest(release, commandedDisplacement: commandedDisplacement, commandedHorizontal: commandedHorizontal)
         }
         DebugLog.log("harvest → \(snapshot.count) rows, filter released \(releases.count) "
             + "(chrome=\(contentFilter.staticIdentities.count)), outcome=\(outcome), "
@@ -519,6 +523,18 @@ final class CaptureController: NSObject, OverlayDelegate {
         case .left, .right: return 0
         }
     }
+
+    /// Horizontal counterpart, for content scrolled sideways.
+    private var commandedHorizontal: Double {
+        guard let direction = lastScrollDirection else { return trackpadHorizontal }
+        switch direction {
+        case .left: return -Double(scrollStep.current)
+        case .right: return Double(scrollStep.current)
+        case .up, .down: return 0
+        }
+    }
+
+    private var trackpadHorizontal: Double = 0
 
     /// Displacement of the most recent trackpad scroll, from the event's own delta.
     ///
