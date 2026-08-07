@@ -6,10 +6,15 @@ import Vision
 
 /// Pixel-path fallback: capture the target window and read text off it with Vision.
 ///
-/// Used only when the accessibility tree yields nothing — canvas-rendered surfaces (some Electron
-/// apps, remote desktops, games, PDFs rendered as images) expose no element tree at all. Everything
-/// this path recovers is display text, so link targets are already gone by the time we see it. That
-/// is the cost of the fallback, and the reason it is not the default.
+/// Used when the accessibility tree yields nothing. That is not a rare corner: **Google Docs,
+/// Sheets and Slides draw to a `<canvas>`**, as do Figma, remote desktops and games, and a canvas
+/// has no semantic structure to read. For those apps this is the only path there is.
+///
+/// Recognised lines carry screen positions exactly as accessibility rows do, so they feed the same
+/// [[ScrollTranscript]] geometry and the same chrome filter — scrolling capture therefore works on
+/// canvas content without any separate machinery. What is lost is everything the pixels no longer
+/// contain: real link targets, exact text, and control state. That is the cost of the fallback and
+/// the reason it is not the default.
 enum OCRHarvester {
 
     struct Capture {
@@ -26,7 +31,10 @@ enum OCRHarvester {
         guard let image = await windowImage(target: target, region: region) else {
             return Capture(rows: [], image: nil)
         }
-        let rows = recognize(image: image, regionOrigin: region.origin)
+        let rows = recognize(
+            image: image, regionOrigin: region.origin,
+            regionWidth: region.width, regionHeight: region.height
+        )
         return Capture(rows: rows, image: keepImage ? image : nil)
     }
 
@@ -65,7 +73,9 @@ enum OCRHarvester {
         }
     }
 
-    private static func recognize(image: CGImage, regionOrigin: CGPoint) -> [CapturedRow] {
+    private static func recognize(
+        image: CGImage, regionOrigin: CGPoint, regionWidth: CGFloat, regionHeight: CGFloat
+    ) -> [CapturedRow] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
@@ -79,16 +89,24 @@ enum OCRHarvester {
         guard let observations = request.results else { return [] }
 
         let height = CGFloat(image.height)
+        let width = CGFloat(image.width)
+        // Vision works on the captured pixels, which are Retina-scaled; positions must come back in
+        // screen points or they cannot be compared against accessibility rows or across scrolls.
+        let scaleY = regionHeight > 0 ? regionHeight / height : 1
+        let scaleX = regionWidth > 0 ? regionWidth / width : 1
+
         let rows: [(row: CapturedRow, y: CGFloat)] = observations.compactMap { observation in
             guard let candidate = observation.topCandidates(1).first else { return nil }
             // Vision reports a normalized, bottom-left-origin box; flip it so ordering matches the
             // accessibility path (ascending y = down the screen).
-            let y = (1 - observation.boundingBox.maxY) * height
+            let y = (1 - observation.boundingBox.maxY) * height * scaleY
+            let x = observation.boundingBox.minX * width * scaleX
             let row = CapturedRow(
                 text: candidate.string,
                 role: "OCRLine",
                 links: urls(in: candidate.string),
-                y: Double(regionOrigin.y + y)
+                y: Double(regionOrigin.y + y),
+                x: Double(regionOrigin.x + x)
             )
             return (row, y)
         }

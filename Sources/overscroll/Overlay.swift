@@ -13,6 +13,7 @@ protocol OverlayDelegate: AnyObject {
     func overlayDidFinish()
     func overlayDidCancel()
     func overlayDidToggleWindowPicking()
+    func overlayDidToggleOCR()
     func overlayDidToggleKeepImage()
 }
 
@@ -79,6 +80,8 @@ final class OverlayView: NSView {
     /// and advertising them just invites the user to press something that does nothing.
     var scrollAvailable: Bool = false { didSet { needsDisplay = true } }
     var rowCount: Int = 0 { didSet { needsDisplay = true } }
+    /// Whether the capture is reading pixels rather than the accessibility tree.
+    var ocrMode: Bool = false { didSet { needsDisplay = true } }
 
     /// Unobserved spans sitting before / after what is currently on screen. Drives the arrows that
     /// point the user back toward content the capture missed.
@@ -334,6 +337,7 @@ final class OverlayView: NSView {
         case .locked:
             if scrollAvailable { parts.append("WASD/arrows or trackpad to scroll") }
             parts.append("I: image \(keepImage ? "ON" : "off")")
+            parts.append("O: \(ocrMode ? "reading pixels" : "read pixels")")
             if rowCount > 0 { parts.append("Return: copy \(rowCount) rows") }
         }
         parts.append("Esc: cancel")
@@ -359,49 +363,14 @@ final class OverlayView: NSView {
     }
 
     private func drawHUD() {
-        // Only advertise keys that currently do something. Listing scroll keys before a target
-        // window is resolved invites the user to press them and conclude the app is broken.
-        var parts: [String] = []
-        switch mode {
-        case .selecting:
-            parts.append("Drag to select")
-            if scrollAvailable { parts.append("WASD/arrows scroll") }
-            parts.append("Space: pick window")
-        case .pickingWindow:
-            parts.append("Click a window")
-            parts.append("Space: back to drag")
-        case .locked:
-            if scrollAvailable { parts.append("WASD/arrows or trackpad to scroll") }
-            parts.append("I: image \(keepImage ? "ON" : "off")")
-            // Copying nothing is not a meaningful action, so the key stays hidden until it is.
-            if rowCount > 0 { parts.append("Return: copy \(rowCount) rows") }
-        }
-        parts.append("Esc: cancel")
-
-        let hint = parts.joined(separator: "  ·  ")
-        let text = statusText.isEmpty ? hint : "\(hint)\n\(statusText)"
-
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: style,
-        ]
-        let size = text.size(withAttributes: attrs)
-        let box = NSRect(
-            x: bounds.midX - size.width / 2 - 16,
-            y: bounds.minY + 48,
-            width: size.width + 32,
-            height: size.height + 20
-        )
+        // Single source of truth: `hudLayout()` builds both the text and the frame, so the gap
+        // arrows can avoid the box the HUD will actually occupy.
+        let layout = hudLayout()
         NSColor.black.withAlphaComponent(0.8).setFill()
-        NSBezierPath(roundedRect: box, xRadius: 10, yRadius: 10).fill()
-        text.draw(
-            in: box.insetBy(dx: 16, dy: 10),
-            withAttributes: attrs
-        )
+        NSBezierPath(roundedRect: layout.box, xRadius: 10, yRadius: 10).fill()
+        layout.text.draw(in: layout.box.insetBy(dx: 16, dy: 10), withAttributes: layout.attrs)
     }
+
 
     // MARK: - Mouse
 
@@ -459,6 +428,7 @@ final class OverlayView: NSView {
         case 53:      delegate?.overlayDidCancel()                // Esc
         case 49:      delegate?.overlayDidToggleWindowPicking()   // Space
         case 34:      delegate?.overlayDidToggleKeepImage()       // I
+        case 31:      delegate?.overlayDidToggleOCR()             // O
         default:      super.keyDown(with: event)
         }
     }

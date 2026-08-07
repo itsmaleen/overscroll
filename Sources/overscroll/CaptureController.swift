@@ -79,6 +79,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         regionCG = .zero
         usedOCR = false
         lastSnapshotRowCount = 0
+        emptyAXHarvests = 0
         usedAX = false
         scrollsSinceChange = 0
         useHIDScroll = false
@@ -196,6 +197,19 @@ final class CaptureController: NSObject, OverlayDelegate {
         view?.keepImage = keepImage
     }
 
+    func overlayDidToggleOCR() {
+        guard Permissions.hasScreenRecording else {
+            Notifier.warn("Reading pixels needs Screen Recording access — grant it in System Settings.")
+            Permissions.requestScreenRecording()
+            return
+        }
+        forceOCR.toggle()
+        view?.ocrMode = forceOCR
+        DebugLog.log("forceOCR = \(forceOCR)")
+        Notifier.info(forceOCR ? "Reading pixels (OCR)" : "Reading the accessibility tree")
+        harvestNow()
+    }
+
     /// Direction of the most recent scroll, so an unplaceable snapshot lands on the correct side
     /// of the transcript instead of always being appended.
     private var lastHint: ScrollHint = .unknown
@@ -231,6 +245,15 @@ final class CaptureController: NSObject, OverlayDelegate {
         }
 
         scrollsSinceChange += 1
+        // Track whether scrolling is actually yielding content, which is what distinguishes a
+        // canvas surface from a merely slow one.
+        if transcript.rows.count > rowCountAtLastScroll {
+            scrollsWithoutGrowth = 0
+        } else {
+            scrollsWithoutGrowth += 1
+        }
+        rowCountAtLastScroll = transcript.rows.count
+
         DebugLog.log("scroll \(direction) step=\(scrollStep.current) "
             + "route=\(useHIDScroll ? "HID" : "pid") sinceChange=\(scrollsSinceChange)")
 
@@ -284,7 +307,15 @@ final class CaptureController: NSObject, OverlayDelegate {
             finishViaOCR(target: target)
             return
         }
-        emit(rows: rows, target: target, mode: usedOCR ? .mixed : .accessibility, image: nil)
+        // Report honestly which path produced the content, since it tells the reader how much to
+        // trust it: OCR rows have already lost their link targets and exact text.
+        let mode: HarvestMode
+        switch (usedAX, usedOCR) {
+        case (true, true): mode = .mixed
+        case (false, true): mode = .ocr
+        default: mode = .accessibility
+        }
+        emit(rows: rows, target: target, mode: mode, image: nil)
     }
 
     func overlayDidCancel() {
@@ -360,6 +391,9 @@ final class CaptureController: NSObject, OverlayDelegate {
 
     /// Rows returned by the most recent harvest, before filtering.
     private var lastSnapshotRowCount = 0
+    /// Consecutive harvests where the accessibility tree returned nothing. Two in a row is the
+    /// signal that this is a canvas surface rather than a tree still warming up.
+    private var emptyAXHarvests = 0
 
     /// Re-harvest a few times if the first read comes back empty.
     ///
@@ -415,6 +449,14 @@ final class CaptureController: NSObject, OverlayDelegate {
         AXHarvester.harvestAsync(window: windowElement, region: regionCG) { [weak self] snapshot in
             Task { @MainActor in
                 guard let self else { return }
+                // A canvas-rendered app returns nothing from the tree, every time — not just at the
+                // end of a capture. Falling back per harvest is what lets Google Docs, Sheets,
+                // Figma and remote desktops be *scrolled* rather than photographed once: OCR lines
+                // carry positions just like accessibility rows, so they feed the same geometry.
+                if self.shouldTryOCR {
+                    self.harvestViaOCR()
+                    return
+                }
                 self.harvestInFlight = false
                 self.ingest(snapshot)
                 if self.harvestQueued {
@@ -425,13 +467,55 @@ final class CaptureController: NSObject, OverlayDelegate {
         }
     }
 
+    /// Whether the pixel path is worth attempting.
+    ///
+    /// Gating this on an *empty* accessibility harvest was wrong for the same reason the scroll
+    /// fallback's original trigger was: a canvas app is not silent, it just says nothing useful.
+    /// Google Docs returns its toolbar and menu bar quite happily — 4 rows where OCR finds 49 — so
+    /// "empty" never happens and the fallback never fires.
+    ///
+    /// The honest signal is that scrolling is not producing content: the view demonstrably moves,
+    /// and the transcript does not grow. That catches canvas surfaces without needing to recognise
+    /// them.
+    private var shouldTryOCR: Bool {
+        guard Permissions.hasScreenRecording else { return false }
+        return forceOCR || scrollsWithoutGrowth >= 3
+    }
+
+    /// Set by the user pressing `O`, for when they already know the target is canvas-rendered and
+    /// would rather not scroll three times to prove it.
+    private var forceOCR = false
+    /// Scrolls issued since the transcript last gained a row.
+    private var scrollsWithoutGrowth = 0
+    private var rowCountAtLastScroll = 0
+
+    private func harvestViaOCR() {
+        guard let target else {
+            harvestInFlight = false
+            return
+        }
+        let region = regionCG
+        Task { @MainActor in
+            let capture = await OCRHarvester.capture(target: target, region: region, keepImage: false)
+            self.harvestInFlight = false
+            if !capture.rows.isEmpty { self.usedOCR = true }
+            DebugLog.log("OCR harvest → \(capture.rows.count) rows")
+            self.ingest(capture.rows)
+            if self.harvestQueued {
+                self.harvestQueued = false
+                self.harvestNow()
+            }
+        }
+    }
+
     private func ingest(_ snapshot: [CapturedRow]) {
         lastSnapshotRowCount = snapshot.count
         guard !snapshot.isEmpty else {
-            DebugLog.log("harvest → 0 rows")
+            emptyAXHarvests += 1
+            DebugLog.log("harvest → 0 rows (empty #\(emptyAXHarvests))")
             return
         }
-        usedAX = true
+        if !usedOCR { usedAX = true }
         var outcome = ScrollTranscript.Outcome.unchanged
         let releases = contentFilter.accept(snapshot)
         for release in releases {

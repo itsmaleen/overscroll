@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import OverscrollAX
 
 /// Menu-bar presence and the global hotkey.
 @MainActor
@@ -214,6 +215,50 @@ func renderPreviewIfRequested() -> Bool {
 }
 
 if renderPreviewIfRequested() {
+    exit(0)
+}
+
+/// Run one OCR harvest against a named window and print what Vision recovered.
+///
+/// Lives in the app binary rather than in `axprobe` so it runs under the app's own bundle identity,
+/// which is what Screen Recording is granted to. Verifies the pixel path end to end — the only
+/// route available for canvas-rendered apps like Google Docs.
+///
+///   Overscroll --ocr-test Helium
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
+   flagIndex + 1 < CommandLine.arguments.count {
+    let name = CommandLine.arguments[flagIndex + 1]
+    guard Permissions.hasScreenRecording else {
+        print("✗ Screen Recording is not granted — the OCR path cannot run without it.")
+        exit(1)
+    }
+    guard let target = WindowResolver.candidates()
+        .filter({ $0.appName.localizedCaseInsensitiveContains(name) })
+        .max(by: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height })
+    else {
+        print("✗ No on-screen window for '\(name)'.")
+        exit(1)
+    }
+
+    print("Target: \(target.appName) — \(target.title ?? "")")
+    // Spin the runloop rather than blocking on a semaphore: ScreenCaptureKit delivers on the main
+    // queue, so waiting on the main thread would deadlock against the very work being awaited.
+    var finished = false
+    Task {
+        let capture = await OCRHarvester.capture(
+            target: target, region: target.bounds, keepImage: false
+        )
+        print("OCR recovered \(capture.rows.count) rows")
+        for row in capture.rows.prefix(15) {
+            print("  y=\(Int(row.y)) x=\(Int(row.x))  \(row.text.prefix(90))")
+        }
+        finished = true
+    }
+    let deadline = Date().addingTimeInterval(20)
+    while !finished, Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    if !finished { print("✗ timed out waiting for the capture") }
     exit(0)
 }
 
