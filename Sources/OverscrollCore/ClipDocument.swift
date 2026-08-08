@@ -10,6 +10,9 @@ public enum HarvestMode: String, Sendable, Codable {
     /// Read from the page source. The best of the three: exact text and real link targets,
     /// with no reliance on what happened to be rendered.
     case dom
+    /// Copied out through the app's own copy command. Lossless: this is the document itself,
+    /// not an observation of it.
+    case export
 }
 
 /// Ambient context captured alongside the content, so a clip pasted into a session three days

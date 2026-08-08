@@ -97,6 +97,8 @@ final class CaptureController: NSObject, OverlayDelegate {
         appliedProfile = nil
         domAttempted = false
         usedDOM = false
+        usedExport = false
+        exportInFlight = false
         autoScrolling = false
         pacer.reset()
         rowsBeforeAutoStep = 0
@@ -260,6 +262,49 @@ final class CaptureController: NSObject, OverlayDelegate {
         }
     }
 
+    /// Pull the whole document out through the app's own copy command.
+    ///
+    /// Bound to a key and never triggered automatically. Every other path here only observes; this
+    /// one drives another app's keyboard, replaces the clipboard and moves the user's selection —
+    /// side effects on their working state, which should follow from an explicit request rather
+    /// than from a heuristic deciding it knows better.
+    func overlayDidRequestExport() {
+        guard let target, !exportInFlight else { return }
+        exportInFlight = true
+        Notifier.info("Copying the whole document from \(target.appName)…")
+        DebugLog.log("export: select-all + copy from \(target.appName)")
+
+        Task { @MainActor in
+            let result = await ClipboardExport.export(from: target)
+            self.exportInFlight = false
+
+            switch result {
+            case .success(let rows):
+                // Wholesale replacement: the copy *is* the document, so anything scraped off the
+                // screen beforehand is a strictly worse version of the same content.
+                self.transcript = ScrollTranscript()
+                self.contentFilter = ScrollingContentFilter()
+                self.usedExport = true
+                self.currentHarvestWasOCR = false
+                self.ingest(rows)
+                DebugLog.log("export → \(rows.count) rows")
+                Notifier.info("Copied \(rows.count) rows — press Return to finish")
+            case .failure(let error):
+                DebugLog.log("export failed: \(error)")
+                Notifier.warn(
+                    error == .copyProducedNothing
+                        ? "Nothing was copied — this app may not support select-all."
+                        : "Could not reach \(target.appName) to copy from it."
+                )
+            }
+            // The target was brought forward to receive the keystrokes; take focus back so the
+            // overlay's own keys work again.
+            NSApp.activate(ignoringOtherApps: true)
+            self.window?.makeKeyAndOrderFront(nil)
+            if let view = self.view { self.window?.makeFirstResponder(view) }
+        }
+    }
+
     func overlayDidToggleOCR() {
         guard Permissions.hasScreenRecording else {
             Notifier.warn("Reading pixels needs Screen Recording access — grant it in System Settings.")
@@ -389,6 +434,7 @@ final class CaptureController: NSObject, OverlayDelegate {
         // trust it: OCR rows have already lost their link targets and exact text.
         let mode: HarvestMode
         switch (usedDOM, usedAX, usedOCR) {
+        case _ where usedExport: mode = .export
         case (true, _, _): mode = .dom
         case (_, true, true): mode = .mixed
         case (_, false, true): mode = .ocr
@@ -616,6 +662,8 @@ final class CaptureController: NSObject, OverlayDelegate {
     /// Whether the DOM path has been tried for this capture; it is worth exactly one attempt.
     private var domAttempted = false
     private var usedDOM = false
+    private var usedExport = false
+    private var exportInFlight = false
 
     /// Start the capture in the state this app is already known to need.
     ///

@@ -14,6 +14,7 @@ protocol OverlayDelegate: AnyObject {
     func overlayDidCancel()
     func overlayDidToggleWindowPicking()
     func overlayDidToggleAutoScroll()
+    func overlayDidRequestExport()
     func overlayDidToggleOCR()
     func overlayDidToggleKeepImage()
 }
@@ -342,6 +343,7 @@ final class OverlayView: NSView {
             parts.append("I: image \(keepImage ? "ON" : "off")")
             parts.append("O: \(ocrMode ? "reading pixels" : "read pixels")")
             parts.append(autoScrolling ? "G: stop auto-scroll" : "G: auto-scroll to end")
+            parts.append("E: copy whole document")
             if rowCount > 0 { parts.append("Return: copy \(rowCount) rows") }
         }
         parts.append("Esc: cancel")
@@ -434,6 +436,7 @@ final class OverlayView: NSView {
         case 34:      delegate?.overlayDidToggleKeepImage()       // I
         case 31:      delegate?.overlayDidToggleOCR()             // O
         case 5:       delegate?.overlayDidToggleAutoScroll()      // G
+        case 14:      delegate?.overlayDidRequestExport()          // E
         default:      super.keyDown(with: event)
         }
     }
