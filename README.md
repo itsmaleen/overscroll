@@ -63,6 +63,7 @@ free hand. Both work, in every state:
 | `Space` | toggle whole-window picking instead of dragging |
 | `W` `A` `S` `D` / arrows | scroll the target |
 | `G` | auto-scroll to the end, unattended |
+| `E` | copy the whole document out via the app's own copy command |
 | `O` | read pixels (OCR) instead of the accessibility tree |
 | `I` | keep the image alongside the markdown |
 | `Return` | finish — markdown to clipboard + `~/Documents/Overscroll/` |
@@ -198,6 +199,29 @@ exists for content with no export path; a spreadsheet has an excellent one.
 The same reasoning applies to Figma, Google Docs, remote desktops, and games. Where there is no
 tree, the OCR fallback is the only route — and it currently captures a single screenful without
 scrolling, so it is not yet a real answer for long canvas content.
+
+## Four ways to read a window
+
+Overscroll prefers the best route the target actually supports, and reports which one it used in
+`mode:` so the reader knows how much to trust the result.
+
+| Mode | Source | When |
+|---|---|---|
+| `export` | the app's own copy command (`E`) | Lossless — the document itself. Never automatic. |
+| `dom` | the page source, via AppleScript | Browser tabs. Exact text, real `href`s, no scrolling. |
+| `accessibility` | the element tree | The default. Exact text, real link targets where exposed. |
+| `ocr` | pixels, via Vision | Canvas apps with no tree at all. Display text only. |
+
+The first two are recent additions and both were prompted by the same realisation: **screen-scraping
+is what you do when there is no better route, not the first thing to reach for.** A Google Doc
+yields nothing to the accessibility tree and has to be OCR'd character by character — while
+select-all-and-copy returns the whole thing, exactly, in one keystroke.
+
+`export` is bound to a key and never automatic, because it is the only path that **writes**. Every
+other route observes; the target app cannot tell it is being read. This one drives another app's
+keyboard, replaces the clipboard and moves the selection. Both effects are undone — the clipboard is
+restored across all its types, not just the string, and the selection is collapsed afterwards so a
+whole-document selection is not left armed for the next keystroke to replace.
 
 ### Columns
 
