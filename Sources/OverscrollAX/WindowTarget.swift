@@ -21,9 +21,12 @@ public struct WindowTarget {
     }
 
     public var isBrowser: Bool {
+        // Chromium forks are numerous and keep appearing; matching only an exact list means each
+        // new one silently loses the DOM path, which is the best path a browser has.
         let browsers = ["Safari", "Google Chrome", "Arc", "Firefox", "Microsoft Edge",
-                        "Brave Browser", "Chromium", "Orion", "Dia", "Comet"]
-        return browsers.contains(appName)
+                        "Brave Browser", "Chromium", "Orion", "Dia", "Comet", "Helium",
+                        "Vivaldi", "Opera", "Zen", "Sidekick", "Thorium"]
+        return browsers.contains { appName.localizedCaseInsensitiveContains($0) }
     }
 }
 

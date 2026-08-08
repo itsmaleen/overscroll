@@ -226,6 +226,32 @@ if renderPreviewIfRequested() {
 /// route available for canvas-rendered apps like Google Docs.
 ///
 ///   Overscroll --ocr-test Helium
+/// Extract the front tab of a browser through its DOM and print what came back.
+///
+///   Overscroll --dom-test "Google Chrome"
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--dom-test"),
+   flagIndex + 1 < CommandLine.arguments.count {
+    let name = CommandLine.arguments[flagIndex + 1]
+    guard let target = WindowResolver.candidates()
+        .filter({ $0.appName.localizedCaseInsensitiveContains(name) })
+        .max(by: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height })
+    else {
+        print("✗ No on-screen window for '\(name)'.")
+        exit(1)
+    }
+    print("Target: \(target.appName) — \(target.title ?? "")")
+    guard let rows = BrowserDOM.extract(from: target) else {
+        print("✗ DOM extraction unavailable — see stderr for the reason.")
+        exit(1)
+    }
+    print("DOM returned \(rows.count) rows, \(rows.reduce(0) { $0 + $1.links.count }) links")
+    for row in rows.prefix(18) {
+        let link = row.links.first.map { " → \($0)" } ?? ""
+        print("  [\(row.role)] \(row.text.prefix(88))\(link)")
+    }
+    exit(0)
+}
+
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--ocr-test"),
    flagIndex + 1 < CommandLine.arguments.count {
     let name = CommandLine.arguments[flagIndex + 1]
