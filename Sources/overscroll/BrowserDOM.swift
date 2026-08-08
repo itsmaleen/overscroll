@@ -18,7 +18,7 @@ enum BrowserDOM {
 
     /// Extract the current tab as rows, or nil if this is not a scriptable browser or the script
     /// was refused.
-    static func extract(from target: WindowTarget) -> [CapturedRow]? {
+    static func extract(from target: WindowTarget, region: CGRect? = nil) -> [CapturedRow]? {
         guard target.isBrowser else {
             note("\(target.appName) is not a known browser")
             return nil
@@ -37,7 +37,7 @@ enum BrowserDOM {
             return nil
         }
         guard let payload = result.stringValue, !payload.isEmpty else { return nil }
-        return rows(from: payload)
+        return rows(from: payload, region: region)
     }
 
     /// Record why the DOM path was unavailable, to both the capture trace and stderr.
@@ -73,38 +73,65 @@ enum BrowserDOM {
     (function(){
       var sel = 'h1,h2,h3,h4,h5,h6,p,li,td,th,blockquote,pre,dt,dd,figcaption';
       var nodes = document.body ? document.body.querySelectorAll(sel) : [];
-      var out = [];
+      var chromeH = window.outerHeight - window.innerHeight;
+      var out = ['@' + window.screenX + '\\t' + (window.screenY + chromeH)];
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
         if (el.querySelector(sel)) continue;
         if (el.offsetParent === null && el.tagName !== 'BODY') continue;
         var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
         if (!text) continue;
+        var r = el.getBoundingClientRect();
         var link = el.querySelector('a[href]');
         var href = link ? link.href : '';
-        out.push(el.tagName.toLowerCase() + '\\t' + href + '\\t' + text);
+        out.push(el.tagName.toLowerCase() + '\\t' + href + '\\t' +
+                 Math.round(r.left) + '\\t' + Math.round(r.top) + '\\t' + text);
       }
       return out.join('\\n');
     })()
     """
 
-    private static func rows(from payload: String) -> [CapturedRow] {
-        payload.split(separator: "\n").enumerated().compactMap { index, line in
+    /// Parse the payload into rows positioned in screen space.
+    ///
+    /// Screen positions matter because the user dragged a *region*, not "this tab". Returning the
+    /// whole document would answer a question they did not ask — the region is the request, and the
+    /// DOM's advantage is exact text and real links within it, not more of it. The page reports its
+    /// own viewport origin so element rects can be lifted into the same coordinate space the
+    /// selection is in.
+    private static func rows(from payload: String, region: CGRect?) -> [CapturedRow] {
+        var lines = payload.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let header = lines.first, header.hasPrefix("@") else { return [] }
+        lines.removeFirst()
+
+        let originParts = header.dropFirst().components(separatedBy: "\t")
+        let originX = Double(originParts.first ?? "") ?? 0
+        let originY = originParts.count > 1 ? (Double(originParts[1]) ?? 0) : 0
+
+        return lines.compactMap { line in
             let parts = line.components(separatedBy: "\t")
-            guard parts.count >= 3 else { return nil }
+            guard parts.count >= 5 else { return nil }
             let tag = parts[0]
             let href = parts[1]
-            let text = parts[2...].joined(separator: "\t")
+            let left = Double(parts[2]) ?? 0
+            let top = Double(parts[3]) ?? 0
+            let text = parts[4...].joined(separator: "\t")
             guard !text.isEmpty else { return nil }
+
+            let screenX = originX + left
+            let screenY = originY + top
+            if let region {
+                // A generous vertical margin: rects are for the element's box, and a heading or a
+                // list item can start slightly above the text the user was aiming at.
+                let expanded = region.insetBy(dx: -20, dy: -20)
+                guard expanded.contains(CGPoint(x: screenX, y: screenY)) else { return nil }
+            }
 
             return CapturedRow(
                 text: text,
                 role: role(for: tag),
                 links: href.isEmpty ? [] : [href],
-                // Document order is the only ordering that matters here, and the DOM already
-                // provides it — there is no geometry to reconcile because nothing was scrolled.
-                y: Double(index),
-                x: 0
+                y: screenY,
+                x: screenX
             )
         }
     }

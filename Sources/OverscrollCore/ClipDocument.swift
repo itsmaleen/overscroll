@@ -7,6 +7,9 @@ public enum HarvestMode: String, Sendable, Codable {
     case accessibility
     case ocr
     case mixed
+    /// Read from the page source. The best of the three: exact text and real link targets,
+    /// with no reliance on what happened to be rendered.
+    case dom
 }
 
 /// Ambient context captured alongside the content, so a clip pasted into a session three days

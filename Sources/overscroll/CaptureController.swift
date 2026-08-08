@@ -95,6 +95,8 @@ final class CaptureController: NSObject, OverlayDelegate {
         harvestQueued = false
         harvestModeDecided = false
         appliedProfile = nil
+        domAttempted = false
+        usedDOM = false
         autoScrolling = false
         pacer.reset()
         rowsBeforeAutoStep = 0
@@ -386,9 +388,10 @@ final class CaptureController: NSObject, OverlayDelegate {
         // Report honestly which path produced the content, since it tells the reader how much to
         // trust it: OCR rows have already lost their link targets and exact text.
         let mode: HarvestMode
-        switch (usedAX, usedOCR) {
-        case (true, true): mode = .mixed
-        case (false, true): mode = .ocr
+        switch (usedDOM, usedAX, usedOCR) {
+        case (true, _, _): mode = .dom
+        case (_, true, true): mode = .mixed
+        case (_, false, true): mode = .ocr
         default: mode = .accessibility
         }
         emit(rows: rows, target: target, mode: mode, image: nil)
@@ -526,6 +529,23 @@ final class CaptureController: NSObject, OverlayDelegate {
     private var harvestQueued = false
 
     private func harvestNow() {
+        // A browser tab is best read from its own DOM: exact text, real link targets, and the whole
+        // document rather than the rendered viewport. Tried first and only once — if the browser
+        // refuses (Automation not granted, or JavaScript from Apple Events switched off) the flag
+        // stops it being retried on every harvest of the capture.
+        if !domAttempted, let target, target.isBrowser, !forceOCR {
+            domAttempted = true
+            if let rows = BrowserDOM.extract(from: target, region: regionCG), !rows.isEmpty {
+                usedDOM = true
+                harvestModeDecided = true
+                DebugLog.log("DOM harvest → \(rows.count) rows (scrolling not required)")
+                Notifier.info("Read \(rows.count) rows from the page source")
+                currentHarvestWasOCR = false
+                ingest(rows)
+                return
+            }
+        }
+
         guard let windowElement, regionCG.width > 1, regionCG.height > 1 else { return }
         if harvestInFlight {
             harvestQueued = true
@@ -593,6 +613,9 @@ final class CaptureController: NSObject, OverlayDelegate {
     private var harvestModeDecided = false
     private var lockedAt = Date()
     private var appliedProfile: AppProfile?
+    /// Whether the DOM path has been tried for this capture; it is worth exactly one attempt.
+    private var domAttempted = false
+    private var usedDOM = false
 
     /// Start the capture in the state this app is already known to need.
     ///
